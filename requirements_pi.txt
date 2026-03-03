@@ -1,0 +1,7 @@
+# Raspberry Pi Edge Device Dependencies
+# Install on the Pi: pip install -r requirements_pi.txt
+
+numpy>=1.24.0
+opencv-python-headless>=4.8.0
+adafruit-circuitpython-mlx90640>=1.2.0
+adafruit-blinka>=8.20.0

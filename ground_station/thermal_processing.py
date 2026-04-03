@@ -60,8 +60,10 @@ class ThermalProcessor:
                 - 'aligned': Homography-warped intensity (720, 1280) uint8
                 - 'temperatures': Approximate temperature map (720, 1280) float32
                 - 'fire_mask': Binary mask of fire pixels (720, 1280) uint8
-                - 'colormap': Colored thermal visualization (720, 1280, 3) uint8
         """
+        # Horizontal flip to match the RGB camera's physical orientation
+        thermal_heatmap = cv2.flip(thermal_heatmap, 1)
+
         intensity_24x32 = self.heatmap_to_intensity(thermal_heatmap)
 
         upscaled_intensity = self.upscale_intensity(intensity_24x32)

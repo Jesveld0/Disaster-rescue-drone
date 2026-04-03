@@ -1,10 +1,17 @@
-# Ground Station Dependencies
-# Install on the laptop: pip install -r requirements_ground.txt
+# PyTorch GPU Repository (Prevents CPU-only installs)
+--extra-index-url https://download.pytorch.org/whl/cu121
 
-numpy>=1.24.0
-opencv-python>=4.8.0
+# Core Deep Learning (Will pull from the URL above)
 torch>=2.0.0
 torchvision>=0.15.0
+
+# Computer Vision & Detection
+opencv-python>=4.8.0
 ultralytics>=8.0.0
 timm>=0.9.0
+
+# Math & Data (Strictly pinned below 2.0.0 to prevent OpenCV crashes)
+numpy>=1.24.0,<2.0.0
+
+# Testing
 pytest>=7.0.0

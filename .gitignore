@@ -8,3 +8,5 @@ dist/
 build/
 output_log.jsonl
 homography.json
+.venv/
+*.pt

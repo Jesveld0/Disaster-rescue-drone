@@ -44,9 +44,10 @@ class Visualizer:
 
     def __init__(self, window_name: str = "Fire Rescue Drone — Ground Station"):
         self.window_name = window_name
-        self.show_thermal_overlay = False
+        self.show_thermal_overlay = True
         self.show_depth_overlay = False
         self.show_fire_overlay = True
+        self._last_thermal = None
 
         # FPS tracking
         self._frame_times: list[float] = []
@@ -89,9 +90,11 @@ class Visualizer:
         """
         display = rgb_frame.copy()
 
-        # Apply overlays
-        if self.show_thermal_overlay and thermal_colormap is not None:
-            display = self._apply_overlay(display, thermal_colormap, THERMAL_OVERLAY_ALPHA)
+        # Save thermal colormap for separate display
+        if thermal_colormap is not None:
+            self._last_thermal = thermal_colormap.copy()
+
+        # Apply overlays (thermal overlay removed since it's displayed in a separate window)
 
         if self.show_depth_overlay and depth_colormap is not None:
             display = self._apply_overlay(display, depth_colormap, 0.4)
@@ -134,11 +137,21 @@ class Visualizer:
             Key code pressed, or -1 if none.
         """
         cv2.imshow(self.window_name, frame)
+        
+        # Display thermal camera in a separate window
+        if self.show_thermal_overlay and self._last_thermal is not None:
+            cv2.imshow("Thermal Camera", self._last_thermal)
+        elif not self.show_thermal_overlay:
+            try:
+                cv2.destroyWindow("Thermal Camera")
+            except cv2.error:
+                pass
+
         key = cv2.waitKey(1) & 0xFF
 
         if key == ord('t'):
             self.show_thermal_overlay = not self.show_thermal_overlay
-            logger.info("Thermal overlay: %s", "ON" if self.show_thermal_overlay else "OFF")
+            logger.info("Thermal window: %s", "ON" if self.show_thermal_overlay else "OFF")
         elif key == ord('d'):
             self.show_depth_overlay = not self.show_depth_overlay
             logger.info("Depth overlay: %s", "ON" if self.show_depth_overlay else "OFF")

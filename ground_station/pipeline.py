@@ -315,18 +315,32 @@ class Pipeline:
         """
         logger.info("Display stage started (main thread)")
 
+        last_frame_time = 0.0
+        last_raw_frame = None
+
         try:
             while self._running:
                 # Get latest raw frame (short timeout for responsive UI)
                 try:
                     raw = self._raw_display_queue.get(timeout=0.03)
+                    last_frame_time = time.time()
+                    last_raw_frame = raw
                 except queue.Empty:
-                    # No new frame — show waiting or keep last frame
-                    self._show_waiting_frame()
-                    key = cv2.waitKey(1) & 0xFF
-                    if key == ord('q'):
-                        self._running = False
-                    continue
+                    if time.time() - last_frame_time > 1.0:
+                        # No new frame for > 1s — show waiting frame
+                        self._show_waiting_frame()
+                        key = cv2.waitKey(1) & 0xFF
+                        if key == ord('q'):
+                            self._running = False
+                        continue
+                    elif last_raw_frame is not None:
+                        # Re-render the last available raw frame
+                        raw = last_raw_frame
+                    else:
+                        key = cv2.waitKey(1) & 0xFF
+                        if key == ord('q'):
+                            self._running = False
+                        continue
 
                 # Get cached inference results (if any)
                 with self._inference_lock:

@@ -4,12 +4,16 @@ thermal_capture.py — MLX90640 thermal camera capture module for Raspberry Pi.
 Reads temperature data from the MLX90640 infrared sensor over I2C and converts
 the raw temperature array to a grayscale image for transmission.
 
+Based on the proven thermal_video.py implementation that works directly on
+the Raspberry Pi hardware.
+
 Grayscale mapping:
     gray = clip((temp - 20) / 130 * 255, 0, 255)
 """
 
 import logging
 import threading
+import time
 import numpy as np
 
 from config import (
@@ -44,6 +48,8 @@ class ThermalCamera:
 
     Falls back to simulated data when hardware is not available.
 
+    Uses the same proven I2C initialization from thermal_video.py.
+
     Usage:
         thermal = ThermalCamera()
         thermal.open()
@@ -58,16 +64,18 @@ class ThermalCamera:
         """
         self.refresh_rate = refresh_rate
         self.mlx = None
+        self._i2c = None
         self._frame_buffer = [0.0] * THERMAL_PIXELS
         self._simulated = not HAS_MLX90640
         self._latest_temps = np.zeros((THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.float32)
         self._latest_gray = np.zeros((THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.uint8)
+        self._lock = threading.Lock()
         self._running = False
         self._thread = None
 
     def open(self) -> bool:
         """
-        Initialize the MLX90640 sensor.
+        Initialize the MLX90640 sensor using the same approach as thermal_video.py.
 
         Returns:
             True if sensor initialized (or simulated mode active).
@@ -77,8 +85,10 @@ class ThermalCamera:
             return True
 
         try:
-            i2c = busio.I2C(board.SCL, board.SDA, frequency=800000)
-            self.mlx = adafruit_mlx90640.MLX90640(i2c)
+            # Exact initialization from thermal_video.py (proven to work)
+            logger.info("Initializing MLX90640 Thermal Camera...")
+            self._i2c = busio.I2C(board.SCL, board.SDA, frequency=800000)
+            self.mlx = adafruit_mlx90640.MLX90640(self._i2c)
 
             # Set refresh rate
             rate_map = {
@@ -97,11 +107,15 @@ class ThermalCamera:
                 "MLX90640 initialized at %d Hz, serial: %s",
                 self.refresh_rate, [hex(i) for i in self.mlx.serial_number],
             )
-            
+
+            # Start the background capture thread
             self._running = True
             self._thread = threading.Thread(target=self._update_loop, daemon=True)
             self._thread.start()
-            
+
+            # Wait briefly to allow the first frame to be captured
+            time.sleep(0.5)
+
             return True
 
         except Exception as e:
@@ -111,18 +125,32 @@ class ThermalCamera:
             return True
 
     def _update_loop(self):
-        """Background thread that continually reads the thermal sensor."""
+        """
+        Background thread that continually reads the thermal sensor.
+        Uses the same getFrame() approach as thermal_video.py.
+        """
         while self._running:
             try:
                 self.mlx.getFrame(self._frame_buffer)
+
+                # Calculate dynamic range like thermal_video.py does
+                min_temp = min(self._frame_buffer)
+                max_temp = max(self._frame_buffer)
+
                 temperatures = np.array(self._frame_buffer, dtype=np.float32).reshape(
                     (THERMAL_HEIGHT, THERMAL_WIDTH)
                 )
-                self._latest_temps = temperatures
-                self._latest_gray = self.temps_to_grayscale(temperatures)
-            except Exception as e:
-                # Silently catch frame drops (very common with I2C MLX sensors)
+                grayscale = self.temps_to_grayscale(temperatures)
+
+                with self._lock:
+                    self._latest_temps = temperatures
+                    self._latest_gray = grayscale
+
+            except ValueError:
+                # Ignore missed internal subpages (common with MLX90640)
                 pass
+            except Exception as e:
+                logger.debug("Frame read error (non-fatal): %s", e)
 
     def read(self) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -136,7 +164,8 @@ class ThermalCamera:
         if self._simulated:
             return self._read_simulated()
 
-        return self._latest_temps, self._latest_gray
+        with self._lock:
+            return self._latest_temps.copy(), self._latest_gray.copy()
 
     def _read_simulated(self) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -199,7 +228,13 @@ class ThermalCamera:
         """Clean up sensor resources."""
         self._running = False
         if self._thread is not None:
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=2.0)
+        if self._i2c is not None:
+            try:
+                self._i2c.deinit()
+            except Exception:
+                pass
+            self._i2c = None
         self.mlx = None
         logger.info("ThermalCamera closed")
 
@@ -213,50 +248,50 @@ class ThermalCamera:
 
 
 if __name__ == "__main__":
-    import time
+    import time as _time
     # Hide standard log spam during video mode
     logging.getLogger().setLevel(logging.ERROR)
-    
-    # 256-color ANSI mapping (Deep Blue -> Blue -> Light Orange -> Orange -> Red)
-    COLORS = [
-        '\033[48;5;17m  \033[0m',  # Deep Blue
-        '\033[48;5;26m  \033[0m',  # Blue
-        '\033[48;5;214m  \033[0m',  # Yellow/Light Orange
-        '\033[48;5;208m  \033[0m',  # Solid Orange
-        '\033[48;5;196m  \033[0m'   # Flashing Red Hot!
-    ]
 
-    print("Booting Blue/Orange ASCII Thermal Feed...")
-    
-    with ThermalCamera(refresh_rate=2) as cam:
+    # ANSI color codes for terminal "heatmap" (from thermal_video.py)
+    COLORS = ['\033[44m  \033[0m',  # Deep Blue (Coldest)
+              '\033[46m  \033[0m',  # Cyan
+              '\033[42m  \033[0m',  # Green
+              '\033[43m  \033[0m',  # Yellow
+              '\033[41m  \033[0m',  # Red (Hottest)
+              '\033[45m  \033[0m']  # Magenta (Burning)
+
+    print("Booting Thermal Camera Feed...")
+
+    with ThermalCamera(refresh_rate=8) as cam:
         try:
-            # Wait a split second for the background thread's first frame
-            time.sleep(1.0)
-            
+            # Wait for the background thread's first frame
+            _time.sleep(1.0)
+
             while True:
                 temps, gray = cam.read()
                 max_t = np.max(temps)
                 min_t = np.min(temps)
-                
+
                 if max_t <= 0.0:
-                    time.sleep(0.5)
+                    _time.sleep(0.5)
                     continue
-                
+
                 range_t = max_t - min_t if max_t != min_t else 1.0
-                
+
                 # Clear terminal and move to top
                 print('\033[2J\033[H', end="")
-                print(f"--- 📡 LIVE BLUE/ORANGE THERMAL FEED | Max: {max_t:.1f}°C ---")
-                
+                print(f"--- LIVE THERMAL STREAM: Max Temp: {max_t:.1f}°C ---")
+
+                # Draw the 32x24 grid row by row
                 for h in range(24):
                     line = ""
                     for w in range(32):
-                        t = temps[h, w]
-                        norm = (t - min_t) / range_t
-                        idx = int(norm * (len(COLORS) - 1))
-                        line += COLORS[idx]
+                        temp = temps[h, w]
+                        norm = (temp - min_t) / range_t
+                        color_idx = int(norm * (len(COLORS) - 1))
+                        line += COLORS[color_idx]
                     print(line)
-                    
-                time.sleep(0.25)  # Limit output speed to 4 FPS visually
+
+                _time.sleep(0.1)
         except KeyboardInterrupt:
             print("\nFeed stopped by user.")

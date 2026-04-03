@@ -181,7 +181,7 @@ class Visualizer:
         """Draw a person bounding box with thermal info."""
         if person.in_fire:
             color = HUMAN_IN_FIRE_COLOR
-            label = f"HUMAN IN FIRE! max={person.max_temp:.0f}°C"
+            label = f"HUMAN IN FIRE! max={person.max_temp:.0f}C"
             thickness = 3
 
             # Flashing effect for critical detection
@@ -191,7 +191,7 @@ class Visualizer:
                 cv2.rectangle(frame, (x1, y1 - 30), (x2, y1), (0, 0, 200), -1)
         else:
             color = PERSON_COLOR
-            label = f"Person ({person.detection.confidence:.2f}) {person.max_temp:.0f}°C"
+            label = f"Person ({person.detection.confidence:.2f}) {person.max_temp:.0f}C"
             thickness = 2
 
         self._draw_bbox(frame, person.detection.bbox, label, color, thickness)
@@ -202,7 +202,7 @@ class Visualizer:
         status = "CONFIRMED" if fire_zone.thermal_confirmed else "visual"
         color = (0, 0, 255) if fire_zone.thermal_confirmed else (0, 100, 255)
 
-        label = f"FIRE ({status}) max={fire_zone.max_temp:.0f}°C"
+        label = f"FIRE ({status}) max={fire_zone.max_temp:.0f}C"
         self._draw_bbox(frame, fire_zone.bbox, label, color, 2)
 
         # Semi-transparent fire overlay

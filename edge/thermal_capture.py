@@ -14,8 +14,9 @@ read() returns (temperatures, heatmap_bgr):
 import logging
 import threading
 import numpy as np
+import cv2
 
-from config import THERMAL_WIDTH, THERMAL_HEIGHT, THERMAL_PIXELS
+from config import THERMAL_WIDTH, THERMAL_HEIGHT, THERMAL_PIXELS, THERMAL_MIN_TEMP, THERMAL_RANGE
 
 logger = logging.getLogger(__name__)
 
@@ -49,17 +50,6 @@ class ThermalCamera:
         temps, heatmap_bgr = cam.read()
         cam.close()
     """
-
-    # JET-like BGR color palette (matching thermal_video.py's 6 terminal colors)
-    # These are actual BGR values for building an OpenCV-compatible image.
-    _PALETTE = np.array([
-        [255, 0, 0],       # Blue (Coldest)
-        [255, 255, 0],     # Cyan
-        [0, 128, 0],       # Green
-        [0, 255, 255],     # Yellow
-        [0, 0, 255],       # Red (Hottest)
-        [255, 0, 255],     # Magenta (Burning)
-    ], dtype=np.uint8)
 
     def __init__(self, refresh_rate: int = 8):
         self.refresh_rate = refresh_rate
@@ -117,32 +107,44 @@ class ThermalCamera:
         """
         Background thread — exact same getFrame() loop as thermal_video.py.
         Converts each frame into a BGR heatmap image.
+
+        Falls back to simulated mode if the sensor fails too many times
+        consecutively (common I2C issue with MLX90640).
         """
+        consecutive_failures = 0
+        MAX_FAILURES = 50  # ~6 seconds at 8Hz before fallback
+
         while self._running:
             try:
                 self.mlx.getFrame(self._frame_buffer)
+                consecutive_failures = 0  # Reset on success
 
-                # Build heatmap exactly like thermal_video.py
-                min_temp = min(self._frame_buffer)
-                max_temp = max(self._frame_buffer)
-                range_temp = max_temp - min_temp if max_temp != min_temp else 1
-
-                heatmap = np.zeros((THERMAL_HEIGHT, THERMAL_WIDTH, 3), dtype=np.uint8)
-                for h in range(THERMAL_HEIGHT):
-                    for w in range(THERMAL_WIDTH):
-                        temp = self._frame_buffer[h * THERMAL_WIDTH + w]
-                        norm = (temp - min_temp) / range_temp
-                        color_idx = int(norm * (len(self._PALETTE) - 1))
-                        heatmap[h, w] = self._PALETTE[color_idx]
+                # Build heatmap using absolute temperature ranges matching ground station expectations
+                temps_array = np.array(self._frame_buffer, dtype=np.float32)
+                norm = (temps_array - THERMAL_MIN_TEMP) / THERMAL_RANGE
+                gray = np.clip(norm * 255, 0, 255).astype(np.uint8)
+                gray_2d = gray.reshape((THERMAL_HEIGHT, THERMAL_WIDTH))
+                heatmap = cv2.applyColorMap(gray_2d, cv2.COLORMAP_JET)
 
                 with self._lock:
                     self._latest_temps = list(self._frame_buffer)
                     self._latest_heatmap = heatmap
 
             except ValueError:
-                pass  # Ignore missed internal subpages
+                consecutive_failures += 1
             except Exception as e:
+                consecutive_failures += 1
                 logger.debug("Frame read error (non-fatal): %s", e)
+
+            # Fall back to simulated if sensor keeps failing
+            if consecutive_failures >= MAX_FAILURES:
+                logger.warning(
+                    "MLX90640: %d consecutive read failures — "
+                    "falling back to simulated thermal data",
+                    consecutive_failures,
+                )
+                self._simulated = True
+                return  # Exit thread; read() will use _read_simulated()
 
     def read(self) -> tuple[list, np.ndarray]:
         """
@@ -178,17 +180,12 @@ class ThermalCamera:
                     )
 
         temps_list = temperatures.tolist()
-        min_temp = min(temps_list)
-        max_temp = max(temps_list)
-        range_temp = max_temp - min_temp if max_temp != min_temp else 1
-
-        heatmap = np.zeros((THERMAL_HEIGHT, THERMAL_WIDTH, 3), dtype=np.uint8)
-        for h in range(THERMAL_HEIGHT):
-            for w in range(THERMAL_WIDTH):
-                temp = temps_list[h * THERMAL_WIDTH + w]
-                norm = (temp - min_temp) / range_temp
-                color_idx = int(norm * (len(self._PALETTE) - 1))
-                heatmap[h, w] = self._PALETTE[color_idx]
+        
+        temps_array = np.array(temperatures, dtype=np.float32)
+        norm = (temps_array - THERMAL_MIN_TEMP) / THERMAL_RANGE
+        gray = np.clip(norm * 255, 0, 255).astype(np.uint8)
+        gray_2d = gray.reshape((THERMAL_HEIGHT, THERMAL_WIDTH))
+        heatmap = cv2.applyColorMap(gray_2d, cv2.COLORMAP_JET)
 
         return temps_list, heatmap
 

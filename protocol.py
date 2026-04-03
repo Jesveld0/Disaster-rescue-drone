@@ -93,7 +93,7 @@ def decode_frame_packet(data: bytes) -> Optional[FramePacket]:
 
     Returns None if the packet is corrupted or malformed.
     """
-    min_size = HEADER_SIZE + METADATA_SIZE + THERMAL_PIXELS
+    min_size = HEADER_SIZE + METADATA_SIZE + THERMAL_PIXELS * 3
     if len(data) < min_size:
         logger.warning("Packet too small: %d bytes (min %d)", len(data), min_size)
         return None

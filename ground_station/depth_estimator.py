@@ -40,14 +40,20 @@ class DepthEstimator:
         """
         Args:
             model_type: MiDaS model variant ('MiDaS_small', 'DPT_Hybrid', 'DPT_Large').
-            device: Compute device ('cuda', 'cpu', or None for auto).
+            device: Compute device ('cuda', 'mps', 'cpu', or None for auto).
         """
         self.model_type = model_type
         self.model = None
         self.transform = None
 
+        # Auto-detect device: CUDA → MPS (Apple Silicon) → CPU
         if device is None:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            if torch.cuda.is_available():
+                self.device = torch.device("cuda")
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                self.device = torch.device("mps")
+            else:
+                self.device = torch.device("cpu")
         else:
             self.device = torch.device(device)
 

@@ -9,6 +9,7 @@ Grayscale mapping:
 """
 
 import logging
+import threading
 import numpy as np
 
 from config import (
@@ -59,6 +60,10 @@ class ThermalCamera:
         self.mlx = None
         self._frame_buffer = [0.0] * THERMAL_PIXELS
         self._simulated = not HAS_MLX90640
+        self._latest_temps = np.zeros((THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.float32)
+        self._latest_gray = np.zeros((THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.uint8)
+        self._running = False
+        self._thread = None
 
     def open(self) -> bool:
         """
@@ -92,6 +97,11 @@ class ThermalCamera:
                 "MLX90640 initialized at %d Hz, serial: %s",
                 self.refresh_rate, [hex(i) for i in self.mlx.serial_number],
             )
+            
+            self._running = True
+            self._thread = threading.Thread(target=self._update_loop, daemon=True)
+            self._thread.start()
+            
             return True
 
         except Exception as e:
@@ -100,9 +110,23 @@ class ThermalCamera:
             logger.info("Falling back to simulated thermal data")
             return True
 
+    def _update_loop(self):
+        """Background thread that continually reads the thermal sensor."""
+        while self._running:
+            try:
+                self.mlx.getFrame(self._frame_buffer)
+                temperatures = np.array(self._frame_buffer, dtype=np.float32).reshape(
+                    (THERMAL_HEIGHT, THERMAL_WIDTH)
+                )
+                self._latest_temps = temperatures
+                self._latest_gray = self.temps_to_grayscale(temperatures)
+            except Exception as e:
+                # Silently catch frame drops (very common with I2C MLX sensors)
+                pass
+
     def read(self) -> tuple[np.ndarray, np.ndarray]:
         """
-        Read a single thermal frame.
+        Read the latest available thermal frame instantly.
 
         Returns:
             (temperatures, grayscale):
@@ -112,19 +136,7 @@ class ThermalCamera:
         if self._simulated:
             return self._read_simulated()
 
-        try:
-            self.mlx.getFrame(self._frame_buffer)
-            temperatures = np.array(self._frame_buffer, dtype=np.float32).reshape(
-                (THERMAL_HEIGHT, THERMAL_WIDTH)
-            )
-        except Exception as e:
-            logger.warning("MLX90640 read error: %s — returning zeros", e)
-            temperatures = np.zeros(
-                (THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.float32
-            )
-
-        grayscale = self.temps_to_grayscale(temperatures)
-        return temperatures, grayscale
+        return self._latest_temps, self._latest_gray
 
     def _read_simulated(self) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -185,6 +197,9 @@ class ThermalCamera:
 
     def close(self):
         """Clean up sensor resources."""
+        self._running = False
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
         self.mlx = None
         logger.info("ThermalCamera closed")
 
@@ -195,3 +210,53 @@ class ThermalCamera:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
         return False
+
+
+if __name__ == "__main__":
+    import time
+    # Hide standard log spam during video mode
+    logging.getLogger().setLevel(logging.ERROR)
+    
+    # 256-color ANSI mapping (Deep Blue -> Blue -> Light Orange -> Orange -> Red)
+    COLORS = [
+        '\033[48;5;17m  \033[0m',  # Deep Blue
+        '\033[48;5;26m  \033[0m',  # Blue
+        '\033[48;5;214m  \033[0m',  # Yellow/Light Orange
+        '\033[48;5;208m  \033[0m',  # Solid Orange
+        '\033[48;5;196m  \033[0m'   # Flashing Red Hot!
+    ]
+
+    print("Booting Blue/Orange ASCII Thermal Feed...")
+    
+    with ThermalCamera(refresh_rate=2) as cam:
+        try:
+            # Wait a split second for the background thread's first frame
+            time.sleep(1.0)
+            
+            while True:
+                temps, gray = cam.read()
+                max_t = np.max(temps)
+                min_t = np.min(temps)
+                
+                if max_t <= 0.0:
+                    time.sleep(0.5)
+                    continue
+                
+                range_t = max_t - min_t if max_t != min_t else 1.0
+                
+                # Clear terminal and move to top
+                print('\033[2J\033[H', end="")
+                print(f"--- 📡 LIVE BLUE/ORANGE THERMAL FEED | Max: {max_t:.1f}°C ---")
+                
+                for h in range(24):
+                    line = ""
+                    for w in range(32):
+                        t = temps[h, w]
+                        norm = (t - min_t) / range_t
+                        idx = int(norm * (len(COLORS) - 1))
+                        line += COLORS[idx]
+                    print(line)
+                    
+                time.sleep(0.25)  # Limit output speed to 4 FPS visually
+        except KeyboardInterrupt:
+            print("\nFeed stopped by user.")

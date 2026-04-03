@@ -117,10 +117,17 @@ class ThermalCamera:
         """
         Background thread — exact same getFrame() loop as thermal_video.py.
         Converts each frame into a BGR heatmap image.
+
+        Falls back to simulated mode if the sensor fails too many times
+        consecutively (common I2C issue with MLX90640).
         """
+        consecutive_failures = 0
+        MAX_FAILURES = 50  # ~6 seconds at 8Hz before fallback
+
         while self._running:
             try:
                 self.mlx.getFrame(self._frame_buffer)
+                consecutive_failures = 0  # Reset on success
 
                 # Build heatmap exactly like thermal_video.py
                 min_temp = min(self._frame_buffer)
@@ -140,9 +147,20 @@ class ThermalCamera:
                     self._latest_heatmap = heatmap
 
             except ValueError:
-                pass  # Ignore missed internal subpages
+                consecutive_failures += 1
             except Exception as e:
+                consecutive_failures += 1
                 logger.debug("Frame read error (non-fatal): %s", e)
+
+            # Fall back to simulated if sensor keeps failing
+            if consecutive_failures >= MAX_FAILURES:
+                logger.warning(
+                    "MLX90640: %d consecutive read failures — "
+                    "falling back to simulated thermal data",
+                    consecutive_failures,
+                )
+                self._simulated = True
+                return  # Exit thread; read() will use _read_simulated()
 
     def read(self) -> tuple[list, np.ndarray]:
         """

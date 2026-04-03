@@ -140,7 +140,23 @@ class Visualizer:
         
         # Display thermal camera in a separate window
         if self.show_thermal_overlay and self._last_thermal is not None:
-            cv2.imshow("Thermal Camera", self._last_thermal)
+            thermal_disp = self._last_thermal
+            # Detect all-zeros (sensor failure / no signal)
+            if np.max(thermal_disp) == 0:
+                h, w = thermal_disp.shape[:2]
+                thermal_disp = np.zeros((h, w, 3), dtype=np.uint8)
+                thermal_disp[:, :] = (40, 20, 20)  # Dark blue-gray
+                cv2.putText(
+                    thermal_disp, "No Thermal Signal",
+                    (w // 2 - 160, h // 2 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (100, 150, 255), 2,
+                )
+                cv2.putText(
+                    thermal_disp, "Check MLX90640 sensor connection",
+                    (w // 2 - 220, h // 2 + 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (80, 80, 120), 1,
+                )
+            cv2.imshow("Thermal Camera", thermal_disp)
         elif not self.show_thermal_overlay:
             try:
                 cv2.destroyWindow("Thermal Camera")

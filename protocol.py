@@ -4,7 +4,7 @@ protocol.py — Binary packet encoding/decoding for drone ↔ ground station com
 Frame Packet (Drone → Ground Station):
     HEADER  (16 bytes): magic(4) + frame_id(4) + timestamp_ms(8)
     METADATA (8 bytes): rgb_w(2) + rgb_h(2) + therm_w(2) + therm_h(2)
-    DATA:               JPEG RGB frame (variable) + thermal grayscale (768 bytes)
+    DATA:               JPEG RGB frame (variable) + thermal heatmap (768 * 3 bytes)
 
 Command Packet (Ground Station → Drone):
     HEADER  (16 bytes): magic(4) + frame_id(4) + timestamp_ms(8)
@@ -43,7 +43,7 @@ class FramePacket:
     thermal_width: int
     thermal_height: int
     rgb_jpeg: bytes             # JPEG-compressed RGB frame
-    thermal_gray: np.ndarray    # uint8 array, shape (thermal_height, thermal_width)
+    thermal_heatmap: np.ndarray # uint8 array, shape (thermal_height, thermal_width, 3)
 
 
 @dataclass
@@ -68,7 +68,7 @@ def encode_frame_packet(packet: FramePacket) -> bytes:
     Serialize a FramePacket to bytes for UDP transmission.
 
     Layout:
-        [HEADER 16B][METADATA 8B][JPEG DATA variable][THERMAL 768B]
+        [HEADER 16B][METADATA 8B][JPEG DATA variable][THERMAL 768*3B]
     """
     header = struct.pack(
         HEADER_FMT,
@@ -83,7 +83,7 @@ def encode_frame_packet(packet: FramePacket) -> bytes:
         packet.thermal_width,
         packet.thermal_height,
     )
-    thermal_bytes = packet.thermal_gray.astype(np.uint8).tobytes()
+    thermal_bytes = packet.thermal_heatmap.astype(np.uint8).tobytes()
     return header + metadata + packet.rgb_jpeg + thermal_bytes
 
 
@@ -111,14 +111,15 @@ def decode_frame_packet(data: bytes) -> Optional[FramePacket]:
         )
 
         # Validate thermal dimensions
-        expected_thermal = therm_w * therm_h
-        if expected_thermal == 0:
+        expected_thermal_pixels = therm_w * therm_h
+        if expected_thermal_pixels == 0:
             logger.warning("Invalid thermal dimensions: %dx%d", therm_w, therm_h)
             return None
 
         # Extract JPEG and thermal data
         payload_start = HEADER_SIZE + METADATA_SIZE
-        jpeg_size = len(data) - payload_start - expected_thermal
+        expected_thermal_bytes = expected_thermal_pixels * 3
+        jpeg_size = len(data) - payload_start - expected_thermal_bytes
 
         if jpeg_size <= 0:
             logger.warning("No JPEG data in packet (jpeg_size=%d)", jpeg_size)
@@ -132,8 +133,8 @@ def decode_frame_packet(data: bytes) -> Optional[FramePacket]:
             logger.warning("Invalid JPEG data (missing SOI marker)")
             return None
 
-        thermal_gray = np.frombuffer(thermal_bytes, dtype=np.uint8).reshape(
-            (therm_h, therm_w)
+        thermal_heatmap = np.frombuffer(thermal_bytes, dtype=np.uint8).reshape(
+            (therm_h, therm_w, 3)
         )
 
         return FramePacket(
@@ -144,7 +145,7 @@ def decode_frame_packet(data: bytes) -> Optional[FramePacket]:
             thermal_width=therm_w,
             thermal_height=therm_h,
             rgb_jpeg=rgb_jpeg,
-            thermal_gray=thermal_gray,
+            thermal_heatmap=thermal_heatmap,
         )
 
     except (struct.error, ValueError) as e:

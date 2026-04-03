@@ -47,7 +47,7 @@ project/
 ├── requirements_ground.txt       # Ground station dependencies
 ├── edge/                         # Raspberry Pi code
 │   ├── rgb_capture.py            # USB camera capture
-│   ├── thermal_capture.py        # MLX90640 + grayscale conversion
+│   ├── thermal_capture.py        # MLX90640 + BGR heatmap generation
 │   └── sender.py                 # UDP sender (main Pi entry)
 ├── ground_station/               # Ground station code
 │   ├── receiver.py               # UDP receiver + reassembly

@@ -46,7 +46,7 @@ class TestLoopback:
         jpeg_bytes = jpeg_buf.tobytes()
 
         # Thermal data
-        thermal = np.random.randint(0, 255, (THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.uint8)
+        thermal = np.random.randint(0, 255, (THERMAL_HEIGHT, THERMAL_WIDTH, 3), dtype=np.uint8)
 
         return FramePacket(
             frame_id=frame_id,
@@ -56,7 +56,7 @@ class TestLoopback:
             thermal_width=THERMAL_WIDTH,
             thermal_height=THERMAL_HEIGHT,
             rgb_jpeg=jpeg_bytes,
-            thermal_gray=thermal,
+            thermal_heatmap=thermal,
         )
 
     def test_loopback_single_frame(self):
@@ -110,7 +110,7 @@ class TestLoopback:
         assert decoded.frame_id == 42
         assert decoded.rgb_width == 1280
         assert decoded.rgb_height == 720
-        np.testing.assert_array_equal(decoded.thermal_gray, original.thermal_gray)
+        np.testing.assert_array_equal(decoded.thermal_heatmap, original.thermal_heatmap)
 
     def test_loopback_command(self):
         """Send and receive a command via UDP loopback."""

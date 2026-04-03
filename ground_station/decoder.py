@@ -1,7 +1,7 @@
 """
 decoder.py — Frame decoding for the ground station.
 
-Decodes JPEG RGB frames and unpacks thermal grayscale arrays
+Decodes JPEG RGB frames and unpacks thermal heatmap arrays
 from received FramePacket objects.
 """
 
@@ -21,7 +21,7 @@ class FrameDecoder:
 
     Handles:
     - JPEG decompression to BGR OpenCV image
-    - Thermal grayscale array reshaping
+    - Thermal heatmap array reshaping
     - Resolution validation and correction
     """
 
@@ -29,7 +29,9 @@ class FrameDecoder:
         self._decode_count = 0
         self._error_count = 0
 
-    def decode(self, packet: FramePacket) -> tuple[np.ndarray | None, np.ndarray | None]:
+    def decode(
+        self, packet: FramePacket
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
         """
         Decode a FramePacket into usable image arrays.
 
@@ -37,19 +39,19 @@ class FrameDecoder:
             packet: Received FramePacket with JPEG and thermal data.
 
         Returns:
-            (rgb_bgr, thermal_gray):
+            (rgb_bgr, thermal_heatmap):
                 rgb_bgr — BGR image as numpy array (H, W, 3), or None on error
-                thermal_gray — Grayscale thermal image (24, 32) uint8, or None on error
+                thermal_heatmap — Heatmap BGR thermal image (24, 32, 3) uint8, or None on error
         """
         rgb_bgr = self._decode_jpeg(packet.rgb_jpeg)
-        thermal_gray = self._decode_thermal(packet.thermal_gray)
+        thermal_heatmap = self._decode_thermal(packet.thermal_heatmap)
 
-        if rgb_bgr is not None and thermal_gray is not None:
+        if rgb_bgr is not None and thermal_heatmap is not None:
             self._decode_count += 1
         else:
             self._error_count += 1
 
-        return rgb_bgr, thermal_gray
+        return rgb_bgr, thermal_heatmap
 
     def _decode_jpeg(self, jpeg_bytes: bytes) -> np.ndarray | None:
         """
@@ -82,25 +84,26 @@ class FrameDecoder:
             logger.warning("JPEG decode error: %s", e)
             return None
 
-    def _decode_thermal(self, thermal_gray: np.ndarray) -> np.ndarray | None:
+    def _decode_thermal(self, thermal_heatmap: np.ndarray) -> np.ndarray | None:
         """
-        Validate and reshape thermal grayscale data.
+        Validate and reshape thermal heatmap data.
 
         Args:
-            thermal_gray: Raw thermal array from packet.
+            thermal_heatmap: Raw thermal array from packet.
 
         Returns:
-            Reshaped (THERMAL_HEIGHT, THERMAL_WIDTH) uint8 array, or None.
+            Reshaped (THERMAL_HEIGHT, THERMAL_WIDTH, 3) uint8 array, or None.
         """
         try:
-            if thermal_gray.size != THERMAL_WIDTH * THERMAL_HEIGHT:
+            expected_elements = THERMAL_WIDTH * THERMAL_HEIGHT * 3
+            if thermal_heatmap.size != expected_elements:
                 logger.warning(
                     "Thermal size mismatch: got %d, expected %d",
-                    thermal_gray.size, THERMAL_WIDTH * THERMAL_HEIGHT,
+                    thermal_heatmap.size, expected_elements,
                 )
                 return None
 
-            reshaped = thermal_gray.reshape((THERMAL_HEIGHT, THERMAL_WIDTH))
+            reshaped = thermal_heatmap.reshape((THERMAL_HEIGHT, THERMAL_WIDTH, 3))
             return reshaped.astype(np.uint8)
 
         except Exception as e:

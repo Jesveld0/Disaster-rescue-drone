@@ -52,7 +52,7 @@ class DecodedFrame:
     frame_id: int
     timestamp_ms: int
     rgb_bgr: np.ndarray         # BGR image (720, 1280, 3)
-    thermal_gray: np.ndarray    # Grayscale thermal (24, 32)
+    thermal_heatmap: np.ndarray # Heatmap BGR thermal (24, 32, 3)
 
 
 @dataclass
@@ -174,15 +174,15 @@ class Pipeline:
                     continue
 
                 # Decode
-                rgb_bgr, thermal_gray = self.decoder.decode(packet)
-                if rgb_bgr is None or thermal_gray is None:
+                rgb_bgr, thermal_heatmap = self.decoder.decode(packet)
+                if rgb_bgr is None or thermal_heatmap is None:
                     continue
 
                 decoded = DecodedFrame(
                     frame_id=packet.frame_id,
                     timestamp_ms=packet.timestamp_ms,
                     rgb_bgr=rgb_bgr,
-                    thermal_gray=thermal_gray,
+                    thermal_heatmap=thermal_heatmap,
                 )
 
                 # Non-blocking put — drop if queue full
@@ -223,7 +223,7 @@ class Pipeline:
                     continue
 
                 # Thermal processing
-                thermal_data = self.thermal_processor.process(decoded.thermal_gray)
+                thermal_data = self.thermal_processor.process(decoded.thermal_heatmap)
 
                 # YOLO detection
                 detections = self.detector.detect(decoded.rgb_bgr)

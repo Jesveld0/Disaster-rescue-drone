@@ -90,7 +90,7 @@ class Pipeline:
         data_port: int = DATA_PORT,
         command_port: int = COMMAND_PORT,
         enable_depth: bool = True,
-        enable_display: bool = False,
+        enable_display: bool = True,
     ):
         """
         Args:
@@ -467,8 +467,8 @@ def main():
         help="Disable MiDaS depth estimation (saves GPU memory)",
     )
     parser.add_argument(
-        "--show", action="store_true",
-        help="Enable OpenCV display window (default is headless)",
+        "--headless", action="store_true",
+        help="Run without GUI windows (logging only)",
     )
     parser.add_argument(
         "--log-level", default="INFO",
@@ -486,12 +486,12 @@ def main():
         data_port=args.port,
         command_port=args.command_port,
         enable_depth=not args.no_depth,
-        enable_display=args.show,
+        enable_display=not args.headless,
     )
 
     def signal_handler(sig, frame):
         logger.info("Signal %d received — shutting down...", sig)
-        pipeline.stop()
+        pipeline.stop()  
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)

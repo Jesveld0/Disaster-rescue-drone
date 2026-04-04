@@ -123,3 +123,14 @@ FIRE_ZONE_OVERLAY_COLOR = (0, 0, 200) # BGR dark red
 # =============================================================================
 LOG_JSON_OUTPUT = True                 # Write per-frame JSON to stdout
 LOG_FILE_PATH = "output_log.jsonl"     # JSONL log file path
+
+# =============================================================================
+# Pathfinding Configuration
+# =============================================================================
+PATHFINDING_GRID_COLS = 64             # Occupancy grid width (cells)
+PATHFINDING_GRID_ROWS = 48             # Occupancy grid height (cells)
+PATHFINDING_OBSTACLE_COST = 255        # Impassable cell cost
+PATHFINDING_PERSON_COST = 80           # High cost — avoid flying over people
+PATHFINDING_FIRE_COST = 255            # Impassable — fire zones
+PATHFINDING_DEPTH_COST_SCALE = 50      # Max added cost from depth proximity
+PATHFINDING_DEPTH_THRESHOLD = 0.6      # Depth value above which cost increases

@@ -7,9 +7,9 @@ A modular attachable payload system for quadcopter drones that detects humans, f
 ## Architecture
 
 ```
-┌─────────────────────────────────┐       UDP (5GHz WiFi)       ┌──────────────────────────────────┐
+┌─────────────────────────────────┐       UDP (5GHz WiFi)       ┌─────────────────────────────────┐
 │       DRONE PAYLOAD (Pi 4)      │ ──────────────────────────► │       GROUND STATION (Laptop)    │
-│                                 │      Frame Data (20 FPS)    │                                  │
+│                                 │      Frame Data (20 FPS)    │                                 │
 │  USB Camera (1280×720 @ 30fps)  │                             │  UDP Receiver + Fragment Reassembly│
 │  MLX90640 Thermal (32×24)       │ ◄────────────────────────── │  YOLOv8 Detection (CUDA)         │
 │  JPEG Compression               │      Commands (STOP/SAFE)   │  MiDaS Depth Estimation          │
@@ -43,6 +43,8 @@ python3 -m pytest tests/ -v
 project/
 ├── config.py                     # All constants & settings
 ├── protocol.py                   # Binary packet encoding/decoding
+├── pathfinding_demo.py           # Standalone A* pathfinding demo
+├── thermal_video.py              # Standalone thermal camera viewer
 ├── requirements_pi.txt           # Pi dependencies
 ├── requirements_ground.txt       # Ground station dependencies
 ├── edge/                         # Raspberry Pi code
@@ -96,6 +98,46 @@ project/
 - `f` — Toggle fire mask overlay
 - `q` — Quit
 
+## A* Pathfinding Demo
+
+Standalone pathfinding module that computes safe navigation paths through a disaster environment using A* search on a 2D occupancy grid.
+
+### Modes
+
+```bash
+# Simulate mode — procedural obstacles, no AI models needed
+python pathfinding_demo.py --simulate
+
+# Webcam mode — live feed analyzed with YOLO + MiDaS
+python pathfinding_demo.py
+
+# Image mode — static image analyzed with YOLO + MiDaS
+python pathfinding_demo.py --image test_scene.jpg
+
+# Custom grid resolution
+python pathfinding_demo.py --simulate --grid-size 80 60
+```
+
+### Occupancy Grid
+
+| Cell Type | Source | Grid Cost |
+|-----------|--------|-----------|
+| Free space | No detection | 0 (fully passable) |
+| Depth proximity | MiDaS depth > 0.6 | 1–50 (weighted) |
+| Person zone | YOLOv8 person detection | 80 (high cost, passable) |
+| Obstacle | YOLOv8 obstacle detection | 255 (impassable) |
+| Fire zone | YOLOv8 fire detection | 255 (impassable) |
+
+### Keyboard Controls (Pathfinding Demo)
+
+- `1` — Set click mode to START
+- `2` — Set click mode to GOAL
+- `r` — Randomize start/goal positions
+- `g` — Regenerate obstacles (simulate mode)
+- `c` — Clear path and markers
+- `q` — Quit
+- **Left-click** — Place start or goal marker on the grid
+
 ## Configuration
 
 Edit `config.py` to adjust:
@@ -104,3 +146,4 @@ Edit `config.py` to adjust:
 - YOLO confidence thresholds
 - Obstacle detection sensitivity
 - Homography calibration matrix
+- Pathfinding grid resolution and cost weights

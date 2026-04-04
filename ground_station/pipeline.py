@@ -90,7 +90,7 @@ class Pipeline:
         data_port: int = DATA_PORT,
         command_port: int = COMMAND_PORT,
         enable_depth: bool = True,
-        enable_display: bool = True,
+        enable_display: bool = False,
     ):
         """
         Args:
@@ -467,8 +467,8 @@ def main():
         help="Disable MiDaS depth estimation (saves GPU memory)",
     )
     parser.add_argument(
-        "--headless", action="store_true",
-        help="Run without display window (logging only)",
+        "--show", action="store_true",
+        help="Enable OpenCV display window (default is headless)",
     )
     parser.add_argument(
         "--log-level", default="INFO",
@@ -486,7 +486,7 @@ def main():
         data_port=args.port,
         command_port=args.command_port,
         enable_depth=not args.no_depth,
-        enable_display=not args.headless,
+        enable_display=args.show,
     )
 
     def signal_handler(sig, frame):

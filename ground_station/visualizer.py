@@ -44,7 +44,7 @@ class Visualizer:
 
     def __init__(self, window_name: str = "Fire Rescue Drone — Ground Station"):
         self.window_name = window_name
-        self.show_thermal_overlay = True
+        self.show_thermal_overlay = False
         self.show_depth_overlay = False
         self.show_fire_overlay = True
         self._last_thermal = None

@@ -10,8 +10,8 @@ import numpy as np
 # =============================================================================
 # Network Configuration
 # =============================================================================
-GROUND_STATION_IP = "192.168.0.149"   # Laptop IP on the 5 GHz WiFi network
-DRONE_IP = "192.168.0.166"            # Raspberry Pi IP
+GROUND_STATION_IP = "192.168.10.38"   # Laptop IP on the 5 GHz WiFi network
+DRONE_IP = "192.168.10.36"            # Raspberry Pi IP
 DATA_PORT = 5000                      # Drone → Ground Station (frame data)
 COMMAND_PORT = 5001                   # Ground Station → Drone (commands)
 BUFFER_SIZE = 65535                   # Max UDP datagram (practical limit)

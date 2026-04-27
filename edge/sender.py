@@ -26,6 +26,8 @@ from config import (
     GROUND_STATION_IP, DATA_PORT, COMMAND_PORT,
     TARGET_FPS, FRAME_INTERVAL, BUFFER_SIZE,
     THERMAL_WIDTH, THERMAL_HEIGHT, COMMAND_NAMES,
+    RGB_WIDTH, RGB_HEIGHT,
+    CMD_STOP, CMD_HUMAN_IN_FIRE, CMD_FIRE_ALERT, CMD_SLOW,
 )
 from protocol import (
     FramePacket, encode_frame_packet, current_timestamp_ms,
@@ -122,8 +124,8 @@ class DroneSender:
                 packet = FramePacket(
                     frame_id=self.frame_id,
                     timestamp_ms=current_timestamp_ms(),
-                    rgb_width=1280,
-                    rgb_height=720,
+                    rgb_width=RGB_WIDTH,
+                    rgb_height=RGB_HEIGHT,
                     thermal_width=THERMAL_WIDTH,
                     thermal_height=THERMAL_HEIGHT,
                     rgb_jpeg=jpeg_bytes,
@@ -198,13 +200,13 @@ class DroneSender:
         via MAVLink or a GPIO signal. Here we log the command.
         """
         cmd_name = COMMAND_NAMES.get(command_code, "UNKNOWN")
-        if command_code == 2:  # STOP
+        if command_code == CMD_STOP:
             logger.critical("⚠️  STOP COMMAND RECEIVED — Halting drone movement!")
-        elif command_code == 4:  # HUMAN_IN_FIRE
+        elif command_code == CMD_HUMAN_IN_FIRE:
             logger.critical("🔥 HUMAN IN FIRE DETECTED — Emergency protocol!")
-        elif command_code == 3:  # FIRE_ALERT
+        elif command_code == CMD_FIRE_ALERT:
             logger.warning("🔥 Fire alert — Proceed with caution")
-        elif command_code == 1:  # SLOW
+        elif command_code == CMD_SLOW:
             logger.info("⚡ Slow down command received")
         else:
             logger.info("✅ Status: %s", cmd_name)

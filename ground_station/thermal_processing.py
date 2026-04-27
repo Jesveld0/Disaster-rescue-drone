@@ -9,6 +9,8 @@ Processes 32x24 grayscale thermal images:
 """
 
 import logging
+from typing import Optional
+
 import cv2
 import numpy as np
 
@@ -30,7 +32,7 @@ class ThermalProcessor:
         grayscale (32x24) → upscale (1280x720) → warp (homography) → fire mask
     """
 
-    def __init__(self, homography_matrix: np.ndarray = None):
+    def __init__(self, homography_matrix: Optional[np.ndarray] = None):
         """
         Args:
             homography_matrix: 3x3 homography for thermal→RGB alignment.

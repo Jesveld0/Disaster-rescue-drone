@@ -146,9 +146,7 @@ class HomographyCalibrator:
                 self._save_homography(self.homography_matrix)
                 cv2.destroyAllWindows()
                 return self.homography_matrix
-
-        cv2.destroyAllWindows()
-        return None
+        # Loop exits only via the explicit returns above
 
     def calibrate_default(self) -> np.ndarray:
         """

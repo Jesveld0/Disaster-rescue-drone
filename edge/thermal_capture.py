@@ -10,6 +10,7 @@ Grayscale mapping:
 
 import logging
 import threading
+from typing import Tuple
 import numpy as np
 
 from config import (
@@ -62,6 +63,7 @@ class ThermalCamera:
         self._simulated = not HAS_MLX90640
         self._latest_temps = np.zeros((THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.float32)
         self._latest_gray = np.zeros((THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.uint8)
+        self._frame_lock = threading.Lock()  # Guards _latest_temps / _latest_gray
         self._running = False
         self._thread = None
 
@@ -118,13 +120,15 @@ class ThermalCamera:
                 temperatures = np.array(self._frame_buffer, dtype=np.float32).reshape(
                     (THERMAL_HEIGHT, THERMAL_WIDTH)
                 )
-                self._latest_temps = temperatures
-                self._latest_gray = self.temps_to_grayscale(temperatures)
+                gray = self.temps_to_grayscale(temperatures)
+                with self._frame_lock:
+                    self._latest_temps = temperatures
+                    self._latest_gray = gray
             except Exception as e:
-                # Silently catch frame drops (very common with I2C MLX sensors)
-                pass
+                # Frame drops are very common with I2C MLX sensors; log at DEBUG
+                logger.debug("Thermal sensor frame drop: %s", e)
 
-    def read(self) -> tuple[np.ndarray, np.ndarray]:
+    def read(self) -> Tuple[np.ndarray, np.ndarray]:
         """
         Read the latest available thermal frame instantly.
 
@@ -136,7 +140,8 @@ class ThermalCamera:
         if self._simulated:
             return self._read_simulated()
 
-        return self._latest_temps, self._latest_gray
+        with self._frame_lock:
+            return self._latest_temps.copy(), self._latest_gray.copy()
 
     def _read_simulated(self) -> tuple[np.ndarray, np.ndarray]:
         """

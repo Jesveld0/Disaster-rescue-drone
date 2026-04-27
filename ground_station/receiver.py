@@ -58,6 +58,7 @@ class FrameReceiver:
         # Networking
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
         # Frame buffer (thread-safe deque)
         self._frame_queue: deque[FramePacket] = deque(maxlen=max_queue_size)
@@ -70,6 +71,7 @@ class FrameReceiver:
         self._recv_thread: Optional[threading.Thread] = None
         self._timeout_thread: Optional[threading.Thread] = None
         self._sender_address: Optional[tuple] = None
+        self._addr_lock = threading.Lock()  # Guards _sender_address
 
         # Fragment reassembly buffer: {frame_fragments_key: {index: payload}}
         self._fragment_buffer: dict[int, dict[int, bytes]] = {}
@@ -107,7 +109,8 @@ class FrameReceiver:
         while self._running:
             try:
                 data, addr = self.socket.recvfrom(BUFFER_SIZE)
-                self._sender_address = addr
+                with self._addr_lock:
+                    self._sender_address = addr
 
                 # Parse fragment header
                 frag_info = parse_fragment_header(data)
@@ -133,24 +136,25 @@ class FrameReceiver:
 
     def _handle_fragment(self, total: int, index: int, payload: bytes):
         """Accumulate fragments and reassemble when complete."""
-        key = self._fragment_counter
-        # Use simple strategy: accumulate until we get all fragments
-        # Reset if we get a fragment 0 (start of new packet)
+        # When the first fragment of a new packet arrives, start a new buffer slot
         if index == 0:
             self._fragment_counter += 1
             key = self._fragment_counter
             self._fragment_buffer[key] = {}
             self._fragment_totals[key] = total
-
-        # Find the most recent key that matches this total
-        for k in sorted(self._fragment_buffer.keys(), reverse=True):
-            if self._fragment_totals.get(k) == total:
-                key = k
-                break
-
-        if key not in self._fragment_buffer:
-            self._fragment_buffer[key] = {}
-            self._fragment_totals[key] = total
+        else:
+            # Find the most recent slot whose declared total matches this fragment's total
+            key = None
+            for k in sorted(self._fragment_buffer.keys(), reverse=True):
+                if self._fragment_totals.get(k) == total:
+                    key = k
+                    break
+            if key is None:
+                # No matching slot yet — create one (handles out-of-order first fragment)
+                self._fragment_counter += 1
+                key = self._fragment_counter
+                self._fragment_buffer[key] = {}
+                self._fragment_totals[key] = total
 
         self._fragment_buffer[key][index] = payload
 
@@ -246,8 +250,9 @@ class FrameReceiver:
 
     @property
     def sender_address(self) -> Optional[tuple]:
-        """Return the address of the drone (last packet source)."""
-        return self._sender_address
+        """Return the address of the drone (last packet source), thread-safe."""
+        with self._addr_lock:
+            return self._sender_address
 
     def stop(self):
         """Stop receiver and clean up resources."""

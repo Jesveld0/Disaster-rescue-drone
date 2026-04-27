@@ -373,6 +373,19 @@ class Visualizer:
     def close(self):
         """Clean up display window and log file."""
         cv2.destroyAllWindows()
-        if self._log_file:
-            self._log_file.close()
+        self._close_log()
         logger.info("Visualizer closed")
+
+    def _close_log(self):
+        """Close the JSON log file handle if open."""
+        if self._log_file is not None:
+            try:
+                self._log_file.close()
+            except IOError:
+                pass
+            finally:
+                self._log_file = None
+
+    def __del__(self):
+        """Fallback: ensure log file is closed even if close() was never called."""
+        self._close_log()

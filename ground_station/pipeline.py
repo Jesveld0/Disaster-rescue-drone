@@ -437,6 +437,7 @@ def main():
         pipeline.stop()
         sys.exit(0)
 
+    # Register BEFORE start() — start() blocks on the display thread
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 

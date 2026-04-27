@@ -14,6 +14,7 @@ from typing import Optional
 from config import (
     CMD_SAFE, CMD_SLOW, CMD_STOP, CMD_FIRE_ALERT, CMD_HUMAN_IN_FIRE,
     COMMAND_NAMES, TIMEOUT_SEC,
+    RGB_WIDTH, RGB_HEIGHT,
 )
 from ground_station.fusion import FusionResult
 from ground_station.detector import DetectionResult
@@ -125,7 +126,7 @@ class DecisionEngine:
             # Method A: Bounding box area threshold
             x1, y1, x2, y2 = obstacle.bbox
             bbox_area = (x2 - x1) * (y2 - y1)
-            frame_area = 1280 * 720  # RGB dimensions
+            frame_area = RGB_WIDTH * RGB_HEIGHT
             area_ratio = bbox_area / frame_area
 
             if area_ratio > 0.20:  # Very large on screen = very close
@@ -161,7 +162,7 @@ class DecisionEngine:
         for obstacle in detections.obstacles:
             x1, y1, x2, y2 = obstacle.bbox
             bbox_area = (x2 - x1) * (y2 - y1)
-            frame_area = 1280 * 720
+            frame_area = RGB_WIDTH * RGB_HEIGHT
             area_ratio = bbox_area / frame_area
 
             if area_ratio > 0.10:  # Medium-large on screen

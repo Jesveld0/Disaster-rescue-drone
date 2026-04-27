@@ -11,6 +11,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
+import cv2
 import numpy as np
 
 from config import FIRE_THRESHOLD_TEMP, HOT_PIXEL_RATIO_THRESHOLD
@@ -198,8 +199,6 @@ class ThermalFusion:
         Uses contour detection on the fire mask to find connected hot regions.
         These are secondary fire indicators when YOLO doesn't detect fire visually.
         """
-        import cv2
-
         zones = []
 
         # Find contours in the fire mask

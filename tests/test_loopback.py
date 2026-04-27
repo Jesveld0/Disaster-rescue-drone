@@ -70,6 +70,7 @@ class TestLoopback:
 
         # Set up receiver
         recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         recv_sock.bind(("127.0.0.1", self.LOOPBACK_PORT))
         recv_sock.settimeout(2.0)
 
@@ -117,6 +118,7 @@ class TestLoopback:
         port = self.LOOPBACK_PORT + 1
 
         recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         recv_sock.bind(("127.0.0.1", port))
         recv_sock.settimeout(2.0)
 
@@ -145,6 +147,7 @@ class TestLoopback:
         n_frames = 5
 
         recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         recv_sock.bind(("127.0.0.1", port))
         recv_sock.settimeout(3.0)
 

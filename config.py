@@ -112,8 +112,8 @@ HOMOGRAPHY_MATRIX = np.eye(3, dtype=np.float64)
 DISPLAY_WIDTH = 1280
 DISPLAY_HEIGHT = 720
 THERMAL_OVERLAY_ALPHA = 0.3           # Transparency for thermal overlay
-FIRE_ZONE_COLOR = (0, 0, 255)         # BGR red
-HUMAN_IN_FIRE_COLOR = (0, 0, 255)     # BGR red
+FIRE_ZONE_COLOR = (0, 0, 255)         # BGR red — intentionally same as HUMAN_IN_FIRE_COLOR
+HUMAN_IN_FIRE_COLOR = (0, 0, 255)     # BGR red — kept separate so each can be tuned independently
 PERSON_COLOR = (0, 255, 0)            # BGR green
 OBSTACLE_COLOR = (0, 165, 255)        # BGR orange
 FIRE_ZONE_OVERLAY_COLOR = (0, 0, 200) # BGR dark red

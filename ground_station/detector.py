@@ -1,43 +1,50 @@
 """
-detector.py — RF-DETR object detection for the ground station.
+detector.py — RT-DETR object detection for the ground station.
 
-Detects persons, fire, and obstacle classes using RF-DETR model
-with COCO pre-trained weights and CUDA acceleration.
+Uses Ultralytics RT-DETR (rtdetr-l.pt) — the same model confirmed working
+in main.py. Detects persons (COCO class 0) with high recall, and optionally
+obstacle classes.
 
-RF-DETR is built on a DINOv2 vision transformer backbone and provides
-state-of-the-art real-time detection performance.
+Reference: main.py (uses RTDETR with classes=[0], conf=0.25, ultralytics API)
 """
 
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 import cv2
 import numpy as np
 import torch
-from PIL import Image
 
-from config import (
-    RFDETR_MODEL_SIZE, RFDETR_CONFIDENCE, RFDETR_PERSON_CONFIDENCE,
-    RFDETR_RESOLUTION, PERSON_CLASS_ID, FIRE_CLASS_LABEL, OBSTACLE_CLASSES,
-)
+from config import RTDETR_WEIGHTS, RTDETR_CONFIDENCE, RTDETR_PERSON_CONFIDENCE, OBSTACLE_COCO_IDS
 
 logger = logging.getLogger(__name__)
 
-# Import RF-DETR (lazy to handle missing dependency gracefully)
 try:
-    from rfdetr import RFDETRBase, RFDETRLarge
-    try:
-        from rfdetr import RFDETRSmall
-    except ImportError:
-        RFDETRSmall = None
-    from rfdetr.util.coco_classes import COCO_CLASSES
-    HAS_RFDETR = True
+    from ultralytics import RTDETR
+    HAS_ULTRALYTICS = True
 except ImportError:
-    HAS_RFDETR = False
-    COCO_CLASSES = []
-    logger.warning("rfdetr not installed — RF-DETR detection disabled")
+    HAS_ULTRALYTICS = False
+    logger.warning("ultralytics not installed — RT-DETR detection disabled")
+
+# COCO 0-indexed class names (Ultralytics standard)
+COCO_CLASSES = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
+    "truck", "boat", "traffic light", "fire hydrant", "stop sign",
+    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep",
+    "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
+    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
+    "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
+    "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork",
+    "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+    "couch", "potted plant", "bed", "dining table", "toilet", "tv",
+    "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave",
+    "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
+    "scissors", "teddy bear", "hair drier", "toothbrush",
+]
+
+PERSON_CLASS_ID = 0  # Ultralytics uses 0-indexed COCO; person = 0
 
 
 @dataclass
@@ -59,193 +66,147 @@ class DetectionResult:
     inference_time_ms: float = 0.0
 
 
-class RFDETRDetector:
+class RTDETRDetector:
     """
-    RF-DETR-based object detector with CUDA support.
+    Ultralytics RT-DETR detector — mirrors the approach in main.py.
 
-    Detects:
-    - Persons (COCO class 0)
-    - Fire (custom class or placeholder)
-    - Obstacles (vehicles, furniture, etc.)
+    Uses rtdetr-l.pt (large model) for best person detection accuracy.
+    Filters to person class at a low confidence threshold (0.25) to
+    maximise recall in rescue scenarios.
 
     Usage:
-        detector = RFDETRDetector()
+        detector = RTDETRDetector()
         result = detector.detect(bgr_frame)
     """
 
-    # COCO class names that map to "obstacle" category
-    # Only physical outdoor obstacles the drone might collide with
-    OBSTACLE_COCO_NAMES = {
-        "car", "truck", "bus", "motorcycle", "bicycle",
-        "traffic light", "stop sign", "fire hydrant",
-        "suitcase", "umbrella",
+    # Physical outdoor obstacle class IDs (0-indexed COCO)
+    OBSTACLE_CLASS_IDS = {
+        1,   # bicycle
+        2,   # car
+        3,   # motorcycle
+        5,   # bus
+        7,   # truck
+        9,   # traffic light
+        11,  # stop sign
     }
 
-    MODEL_CLASSES = {
-        "large": RFDETRLarge if HAS_RFDETR else None,
-        "base":  RFDETRBase  if HAS_RFDETR else None,
-        "small": RFDETRSmall if HAS_RFDETR else None,
-    }
-
-    def __init__(self, model_size: str = RFDETR_MODEL_SIZE, device: str = None):
-        """
-        Args:
-            model_size: RF-DETR model variant ('base', 'small', 'large').
-            device: Compute device ('cuda', 'cpu', or None for auto).
-        """
-        self.model_size = model_size
+    def __init__(self, weights: str = None, device: str = None):
         self.model = None
 
-        # Auto-detect device
         if device is None:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            if torch.cuda.is_available():
+                self.device = "cuda"
+            elif torch.backends.mps.is_available():
+                self.device = "mps"
+            else:
+                self.device = "cpu"
         else:
             self.device = device
 
+        self._weights = weights or RTDETR_WEIGHTS
         self._load_model()
 
     def _load_model(self):
-        """Load the RF-DETR model."""
-        if not HAS_RFDETR:
-            logger.error("Cannot load RF-DETR — rfdetr not installed")
+        if not HAS_ULTRALYTICS:
+            logger.error("Cannot load RT-DETR — ultralytics not installed")
             return
-
         try:
-            model_cls = self.MODEL_CLASSES.get(self.model_size)
-            if model_cls is None:
-                logger.warning(
-                    "RF-DETR '%s' not available, falling back to 'large'",
-                    self.model_size,
-                )
-                model_cls = RFDETRLarge
-
-            logger.info(
-                "Loading RF-DETR model: %s | resolution=%d | device=%s",
-                model_cls.__name__, RFDETR_RESOLUTION, self.device,
-            )
-            # resolution must be divisible by 56
-            self.model = model_cls(resolution=RFDETR_RESOLUTION)
-
+            logger.info("Loading RT-DETR: %s on %s", self._weights, self.device)
+            self.model = RTDETR(self._weights)
             # Warm up
-            dummy = Image.fromarray(np.zeros((RFDETR_RESOLUTION, RFDETR_RESOLUTION, 3), dtype=np.uint8))
-            self.model.predict(dummy, threshold=RFDETR_PERSON_CONFIDENCE)
-
-            logger.info(
-                "RF-DETR loaded. COCO classes=%d | person_threshold=%.2f | general_threshold=%.2f",
-                len(COCO_CLASSES), RFDETR_PERSON_CONFIDENCE, RFDETR_CONFIDENCE,
+            dummy = np.zeros((64, 64, 3), dtype=np.uint8)
+            self.model.predict(
+                source=dummy, device=self.device,
+                classes=[PERSON_CLASS_ID], conf=RTDETR_PERSON_CONFIDENCE,
+                verbose=False,
             )
-
+            logger.info(
+                "RT-DETR loaded. person_conf=%.2f  obstacle_conf=%.2f  device=%s",
+                RTDETR_PERSON_CONFIDENCE, RTDETR_CONFIDENCE, self.device,
+            )
         except Exception as e:
-            logger.error("Failed to load RF-DETR model: %s", e)
+            logger.error("Failed to load RT-DETR: %s", e)
             self.model = None
 
     def detect(self, bgr_frame: np.ndarray) -> DetectionResult:
         """
-        Run object detection on a BGR frame.
+        Run detection on a BGR frame.
 
-        Uses two confidence thresholds:
-        - RFDETR_PERSON_CONFIDENCE (0.2) for persons — maximise recall
-        - RFDETR_CONFIDENCE (0.3) for all other classes
+        Runs two passes (both are fast — Ultralytics batches internally):
+          Pass 1: persons only at low conf (0.25) — maximise recall
+          Pass 2: obstacle classes at normal conf (0.3)
 
-        This means we run one inference at the lower person threshold and
-        filter each detection individually by category.
+        Returns DetectionResult with persons, fires, obstacles lists.
         """
         result = DetectionResult()
-
         if self.model is None:
             return result
 
         start = time.monotonic()
 
         try:
-            rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
-            pil_image = Image.fromarray(rgb_frame)
+            # --- Pass 1: persons only, low threshold ---
+            res_persons = self.model.predict(
+                source=bgr_frame,
+                device=self.device,
+                classes=[PERSON_CLASS_ID],
+                conf=RTDETR_PERSON_CONFIDENCE,
+                verbose=False,
+            )[0]
 
-            # Single inference at the lower person threshold.
-            # Person detections that fall between RFDETR_PERSON_CONFIDENCE and
-            # RFDETR_CONFIDENCE would be missed if we only ran at the higher threshold.
-            detections = self.model.predict(
-                pil_image,
-                threshold=RFDETR_PERSON_CONFIDENCE,
-            )
+            if res_persons.boxes is not None and len(res_persons.boxes) > 0:
+                xyxy  = res_persons.boxes.xyxy.cpu().numpy()
+                confs = res_persons.boxes.conf.cpu().numpy()
+                for (x1, y1, x2, y2), c in zip(xyxy, confs):
+                    result.persons.append(Detection(
+                        bbox=(int(x1), int(y1), int(x2), int(y2)),
+                        confidence=float(c),
+                        class_id=PERSON_CLASS_ID,
+                        class_name="person",
+                        category="person",
+                    ))
 
-            result.inference_time_ms = round((time.monotonic() - start) * 1000, 1)
+            # --- Pass 2: obstacle classes, normal threshold ---
+            obstacle_ids = list(self.OBSTACLE_CLASS_IDS)
+            res_obs = self.model.predict(
+                source=bgr_frame,
+                device=self.device,
+                classes=obstacle_ids,
+                conf=RTDETR_CONFIDENCE,
+                verbose=False,
+            )[0]
 
-            if detections is None or len(detections) == 0:
-                return result
-
-            boxes       = detections.xyxy
-            confidences = detections.confidence
-            class_ids   = detections.class_id
-
-            for bbox, conf, cls_id in zip(boxes, confidences, class_ids):
-                x1, y1, x2, y2 = map(int, bbox)
-                cls_id = int(cls_id)
-                conf   = float(conf)
-
-                if 0 <= cls_id < len(COCO_CLASSES):
-                    class_name = COCO_CLASSES[cls_id]
-                else:
-                    class_name = f"class_{cls_id}"
-
-                logger.debug(
-                    "Raw detection: id=%d name='%s' conf=%.2f",
-                    cls_id, class_name, conf,
-                )
-
-                category = self._categorize(class_name, cls_id)
-
-                # Apply per-category confidence gate
-                if category == "person":
-                    if conf < RFDETR_PERSON_CONFIDENCE:
-                        continue   # already filtered by model, but guard anyway
-                else:
-                    if conf < RFDETR_CONFIDENCE:   # stricter gate for non-persons
-                        continue
-
-                detection = Detection(
-                    bbox=(x1, y1, x2, y2),
-                    confidence=conf,
-                    class_id=cls_id,
-                    class_name=class_name,
-                    category=category,
-                )
-
-                if category == "person":
-                    result.persons.append(detection)
-                elif category == "fire":
-                    result.fires.append(detection)
-                elif category == "obstacle":
-                    result.obstacles.append(detection)
+            if res_obs.boxes is not None and len(res_obs.boxes) > 0:
+                xyxy    = res_obs.boxes.xyxy.cpu().numpy()
+                confs   = res_obs.boxes.conf.cpu().numpy()
+                cls_ids = res_obs.boxes.cls.cpu().numpy().astype(int)
+                for (x1, y1, x2, y2), c, cls_id in zip(xyxy, confs, cls_ids):
+                    class_name = COCO_CLASSES[cls_id] if cls_id < len(COCO_CLASSES) else f"class_{cls_id}"
+                    result.obstacles.append(Detection(
+                        bbox=(int(x1), int(y1), int(x2), int(y2)),
+                        confidence=float(c),
+                        class_id=int(cls_id),
+                        class_name=class_name,
+                        category="obstacle",
+                    ))
 
         except Exception as e:
-            logger.error("RF-DETR detection error: %s", e)
-            result.inference_time_ms = (time.monotonic() - start) * 1000
+            logger.error("RT-DETR detection error: %s", e)
+
+        result.inference_time_ms = round((time.monotonic() - start) * 1000, 1)
+
+        if result.persons:
+            logger.debug(
+                "Detected %d person(s), %d obstacle(s) in %.0fms",
+                len(result.persons), len(result.obstacles), result.inference_time_ms,
+            )
 
         return result
 
-    def _categorize(self, class_name: str, class_id: int) -> str:
-        """
-        Categorize a detected class into person/fire/obstacle.
-
-        Checks class name first (robust across RF-DETR version differences
-        in whether COCO classes are 0-indexed or 1-indexed).
-        """
-        name = class_name.lower().strip()
-
-        # Person — check by name first, then by ID as fallback
-        if name == "person" or class_id == PERSON_CLASS_ID:
-            return "person"
-
-        if name in ("fire", "flame", "smoke"):
-            return "fire"
-
-        if name in self.OBSTACLE_COCO_NAMES:
-            return "obstacle"
-
-        return "unknown"
-
     @property
     def is_loaded(self) -> bool:
-        """Check if the model is loaded and ready."""
         return self.model is not None
+
+
+# Keep old name as alias so pipeline.py import still works
+RFDETRDetector = RTDETRDetector

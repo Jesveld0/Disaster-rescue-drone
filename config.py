@@ -82,20 +82,16 @@ TIMEOUT_SEC = TIMEOUT_MS / 1000.0    # 0.5 s
 JPEG_QUALITY = 65  # ~30-50 KB at 640x480 — good balance of quality vs bandwidth
 
 # =============================================================================
-# AI Model Configuration — RF-DETR
+# AI Model Configuration — Ultralytics RT-DETR (same as main.py)
 # =============================================================================
-RFDETR_MODEL_SIZE = "large"           # large gives the best accuracy; XL/2XL require rfdetr[plus]
-RFDETR_CONFIDENCE = 0.3               # General detection threshold
-RFDETR_PERSON_CONFIDENCE = 0.2        # Lower threshold just for persons — maximise recall
-RFDETR_RESOLUTION = 840              # Input resolution (must be divisible by 56); higher = better small-object detection
+RTDETR_WEIGHTS = "rtdetr-l.pt"        # Large model — best accuracy, auto-downloads
+RTDETR_CONFIDENCE = 0.3               # General detection threshold (obstacles)
+RTDETR_PERSON_CONFIDENCE = 0.25       # Person-specific threshold — matches main.py
 
-# COCO class mapping
-# RF-DETR uses 1-indexed COCO class IDs (person = 1, not 0)
-PERSON_CLASS_ID = 1
-# Fire and obstacle classes will come from custom model or be mapped separately
-FIRE_CLASS_LABEL = "fire"
-OBSTACLE_CLASSES = ["car", "truck", "bus", "motorcycle", "bicycle",
-                    "bench", "chair", "potted plant"]
+# Ultralytics uses 0-indexed COCO class IDs (person = 0)
+PERSON_CLASS_ID = 0
+# Obstacle class IDs to detect (0-indexed COCO)
+OBSTACLE_COCO_IDS = [1, 2, 3, 5, 7, 9, 11]  # bicycle,car,motorcycle,bus,truck,traffic light,stop sign
 
 # MiDaS depth estimation
 MIDAS_MODEL_TYPE = "MiDaS_small"      # Lightweight for real-time

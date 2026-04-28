@@ -1,20 +1,20 @@
 # PyTorch GPU Repository (Prevents CPU-only installs)
 --extra-index-url https://download.pytorch.org/whl/cu121
 
-# Core Deep Learning (Will pull from the URL above)
+# Core Deep Learning
 torch>=2.0.0
 torchvision>=0.15.0
 
-# Computer Vision & Detection
+# Object Detection — Ultralytics RT-DETR (same model as main.py)
+ultralytics>=8.2.0
+
+# Computer Vision
 opencv-python>=4.8.0
-rfdetr>=0.1.0
-supervision>=0.25.0
-timm>=0.9.0
 
 # Human Tracking
 deep-sort-realtime>=1.3.2
 
-# Math & Data (Strictly pinned below 2.0.0 to prevent OpenCV crashes)
+# Math & Data (pinned below 2.0.0 to prevent OpenCV crashes)
 numpy>=1.24.0,<2.0.0
 
 # Image Processing

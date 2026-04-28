@@ -2,12 +2,13 @@
 sender.py — UDP frame sender for the drone payload (Raspberry Pi).
 
 Captures RGB and thermal frames, encodes them into the binary protocol,
-and transmits via UDP to the ground station. Also listens for incoming
-command packets.
+and transmits via UDP to the ground station. Also reads IR proximity
+sensors and sends obstacle data, and listens for incoming command packets.
 
 Usage:
     python -m edge.sender
     python -m edge.sender --ground-ip 192.168.1.100 --device 0
+    python -m edge.sender --no-ir   # Disable IR sensors (dev mode)
 """
 
 import argparse
@@ -23,7 +24,7 @@ import numpy as np
 sys.path.insert(0, ".")
 
 from config import (
-    GROUND_STATION_IP, DATA_PORT, COMMAND_PORT,
+    GROUND_STATION_IP, DATA_PORT, COMMAND_PORT, OBSTACLE_PORT,
     TARGET_FPS, FRAME_INTERVAL, BUFFER_SIZE,
     THERMAL_WIDTH, THERMAL_HEIGHT, COMMAND_NAMES,
     RGB_WIDTH, RGB_HEIGHT,
@@ -31,10 +32,11 @@ from config import (
 )
 from protocol import (
     FramePacket, encode_frame_packet, current_timestamp_ms,
-    fragment_packet, decode_command,
+    fragment_packet, decode_command, encode_obstacle_packet,
 )
 from edge.rgb_capture import RGBCamera
 from edge.thermal_capture import ThermalCamera
+from edge.ir_sensor import IRSensorArray
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,7 @@ class DroneSender:
 
     Captures from both cameras, encodes frames into protocol packets,
     and sends them via UDP to the ground station at the target FPS.
+    Also reads IR proximity sensors and sends obstacle data.
     Simultaneously listens for command responses.
     """
 
@@ -53,18 +56,26 @@ class DroneSender:
         ground_ip: str = GROUND_STATION_IP,
         data_port: int = DATA_PORT,
         command_port: int = COMMAND_PORT,
+        obstacle_port: int = OBSTACLE_PORT,
         camera_index: int = 0,
+        enable_ir: bool = True,
     ):
         self.ground_ip = ground_ip
         self.data_port = data_port
         self.command_port = command_port
+        self.obstacle_port = obstacle_port
 
         # Cameras
         self.rgb_camera = RGBCamera(device_index=camera_index)
         self.thermal_camera = ThermalCamera()
 
+        # IR Proximity Sensors
+        self.ir_sensors = IRSensorArray(simulated=not enable_ir)
+        self.enable_ir = enable_ir
+
         # Networking
         self.send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.obstacle_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.cmd_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
         # State
@@ -74,7 +85,7 @@ class DroneSender:
         self._cmd_thread = None
 
     def start(self):
-        """Initialize cameras and begin the capture-send loop."""
+        """Initialize cameras, sensors, and begin the capture-send loop."""
         logger.info("Initializing drone sender...")
 
         # Open cameras
@@ -84,6 +95,11 @@ class DroneSender:
         if not self.thermal_camera.open():
             logger.error("Cannot start without thermal camera")
             return
+
+        # Start IR sensors
+        self.ir_sensors.start()
+        ir_mode = "HARDWARE" if not self.ir_sensors.is_simulated else "SIMULATED"
+        logger.info("IR sensors: %s mode", ir_mode)
 
         # Bind command listener
         self.cmd_socket.bind(("0.0.0.0", self.command_port))
@@ -100,6 +116,10 @@ class DroneSender:
         logger.info(
             "Drone sender started. Sending to %s:%d at %d FPS",
             self.ground_ip, self.data_port, TARGET_FPS,
+        )
+        logger.info(
+            "Obstacle data → %s:%d",
+            self.ground_ip, self.obstacle_port,
         )
 
         self._capture_loop()
@@ -132,9 +152,12 @@ class DroneSender:
                     thermal_gray=thermal_gray,
                 )
 
-                # Encode and send
+                # Encode and send frame
                 raw = encode_frame_packet(packet)
                 self._send_packet(raw)
+
+                # Read IR sensors and send obstacle data
+                self._send_obstacle_data()
 
                 self.frame_id += 1
 
@@ -146,9 +169,13 @@ class DroneSender:
 
                 # Periodic stats logging
                 if self.frame_id % 100 == 0:
+                    ir_state = self.ir_sensors.get_state()
                     logger.info(
-                        "Sent frame %d | packet size: %d bytes | loop time: %.1f ms",
+                        "Sent frame %d | packet size: %d bytes | loop time: %.1f ms | "
+                        "IR: F=%s B=%s L=%s R=%s",
                         self.frame_id, len(raw), elapsed * 1000,
+                        ir_state.front, ir_state.back,
+                        ir_state.left, ir_state.right,
                     )
 
         except KeyboardInterrupt:
@@ -169,6 +196,25 @@ class DroneSender:
                 self.send_socket.sendto(frag, (self.ground_ip, self.data_port))
             except OSError as e:
                 logger.error("Send error: %s", e)
+
+    def _send_obstacle_data(self):
+        """Read IR sensors and send obstacle packet to ground station."""
+        ir_state = self.ir_sensors.get_state()
+
+        obstacle_packet = encode_obstacle_packet(
+            frame_id=self.frame_id,
+            front=ir_state.front,
+            back=ir_state.back,
+            left=ir_state.left,
+            right=ir_state.right,
+        )
+
+        try:
+            self.obstacle_socket.sendto(
+                obstacle_packet, (self.ground_ip, self.obstacle_port)
+            )
+        except OSError as e:
+            logger.error("Obstacle send error: %s", e)
 
     def _listen_commands(self):
         """Background thread: listen for command packets from ground station."""
@@ -216,7 +262,9 @@ class DroneSender:
         self.running = False
         self.rgb_camera.close()
         self.thermal_camera.close()
+        self.ir_sensors.stop()
         self.send_socket.close()
+        self.obstacle_socket.close()
         self.cmd_socket.close()
         logger.info("Drone sender stopped")
 
@@ -239,8 +287,16 @@ def main():
         help=f"Command port (default: {COMMAND_PORT})",
     )
     parser.add_argument(
+        "--obstacle-port", type=int, default=OBSTACLE_PORT,
+        help=f"Obstacle data port (default: {OBSTACLE_PORT})",
+    )
+    parser.add_argument(
         "--device", type=int, default=0,
         help="Camera device index (default: 0)",
+    )
+    parser.add_argument(
+        "--no-ir", action="store_true",
+        help="Disable IR proximity sensors (simulated mode)",
     )
     parser.add_argument(
         "--log-level", default="INFO",
@@ -257,7 +313,9 @@ def main():
         ground_ip=args.ground_ip,
         data_port=args.data_port,
         command_port=args.command_port,
+        obstacle_port=args.obstacle_port,
         camera_index=args.device,
+        enable_ir=not args.no_ir,
     )
     sender.start()
 

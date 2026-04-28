@@ -7,11 +7,18 @@ torchvision>=0.15.0
 
 # Computer Vision & Detection
 opencv-python>=4.8.0
-ultralytics>=8.0.0
+rfdetr>=0.1.0
+supervision>=0.25.0
 timm>=0.9.0
+
+# Human Tracking
+deep-sort-realtime>=1.3.2
 
 # Math & Data (Strictly pinned below 2.0.0 to prevent OpenCV crashes)
 numpy>=1.24.0,<2.0.0
+
+# Image Processing
+Pillow>=10.0.0
 
 # Testing
 pytest>=7.0.0

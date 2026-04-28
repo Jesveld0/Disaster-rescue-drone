@@ -3,10 +3,13 @@ visualizer.py — Annotated display window and JSON output for the ground statio
 
 Renders:
 - Bounding boxes for persons (green), fire zones (red), obstacles (orange)
+- Persistent track IDs above person bounding boxes
 - Humans in fire highlighted in bright red with warning text
+- IR proximity sensor directional indicators
+- Pathfinding grid overlay (toggle with 'p')
 - Thermal overlay toggle
 - Fire zone semi-transparent highlighting
-- Status bar with FPS, command, frame info
+- Status bar with FPS, command, frame info, tracker stats
 - Per-frame structured JSON output
 """
 
@@ -27,6 +30,8 @@ from config import (
 )
 from ground_station.fusion import FusionResult, PersonAnalysis, FireZone
 from ground_station.detector import DetectionResult
+from ground_station.tracker import TrackedPerson, TrackingResult
+from protocol import ObstaclePacket
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +45,27 @@ class Visualizer:
         't' — Toggle thermal overlay
         'd' — Toggle depth map overlay
         'f' — Toggle fire mask overlay
+        'p' — Toggle pathfinding grid overlay
     """
+
+    # Colors for track ID display
+    TRACK_COLORS = [
+        (255, 50, 50),    # Blue-ish
+        (50, 255, 50),    # Green
+        (50, 50, 255),    # Red
+        (255, 255, 50),   # Cyan
+        (255, 50, 255),   # Magenta
+        (50, 255, 255),   # Yellow
+        (200, 150, 50),   # Steel blue
+        (50, 200, 150),   # Teal
+    ]
 
     def __init__(self, window_name: str = "Fire Rescue Drone — Ground Station"):
         self.window_name = window_name
         self.show_thermal_overlay = True
         self.show_depth_overlay = False
         self.show_fire_overlay = True
+        self.show_grid_overlay = False
         self._last_thermal = None
 
         # FPS tracking
@@ -71,6 +90,9 @@ class Visualizer:
         thermal_colormap: Optional[np.ndarray] = None,
         fire_mask: Optional[np.ndarray] = None,
         depth_colormap: Optional[np.ndarray] = None,
+        tracking_result: Optional[TrackingResult] = None,
+        ir_obstacles: Optional[ObstaclePacket] = None,
+        grid_overlay: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Render a fully annotated display frame.
@@ -78,12 +100,15 @@ class Visualizer:
         Args:
             rgb_frame: Base BGR image (720, 1280, 3).
             fusion_result: Fusion analysis results.
-            detections: Raw YOLO detections.
+            detections: Raw detection results.
             command_code: Current command being sent to drone.
             frame_id: Current frame ID.
             thermal_colormap: Optional colorized thermal overlay.
             fire_mask: Optional binary fire mask.
             depth_colormap: Optional colorized depth map.
+            tracking_result: Optional DeepSORT tracking results.
+            ir_obstacles: Optional IR proximity sensor data.
+            grid_overlay: Optional pathfinding grid image.
 
         Returns:
             Annotated BGR frame.
@@ -114,18 +139,36 @@ class Visualizer:
                 OBSTACLE_COLOR, thickness=2,
             )
 
-        # Draw persons (green for safe, red for in-fire)
-        for person in fusion_result.persons:
-            self._draw_person(display, person)
+        # Draw tracked persons with IDs (if tracking available)
+        if tracking_result and tracking_result.tracked_persons:
+            self._draw_tracked_persons(display, tracking_result, fusion_result)
+        else:
+            # Fallback: draw persons without track IDs
+            for person in fusion_result.persons:
+                self._draw_person(display, person)
+
+        # Draw IR proximity sensor indicators
+        if ir_obstacles is not None:
+            self._draw_ir_indicators(display, ir_obstacles)
+
+        # Draw pathfinding grid overlay (bottom-right corner)
+        if self.show_grid_overlay and grid_overlay is not None:
+            self._draw_grid_overlay(display, grid_overlay)
 
         # Draw status bar
-        self._draw_status_bar(display, command_code, frame_id, detections, fusion_result)
+        self._draw_status_bar(
+            display, command_code, frame_id, detections,
+            fusion_result, tracking_result, ir_obstacles,
+        )
 
         # Update FPS
         self._update_fps()
 
         # Generate JSON output
-        self._output_json(frame_id, fusion_result, detections, command_code)
+        self._output_json(
+            frame_id, fusion_result, detections, command_code,
+            tracking_result, ir_obstacles,
+        )
 
         return display
 
@@ -137,7 +180,7 @@ class Visualizer:
             Key code pressed, or -1 if none.
         """
         cv2.imshow(self.window_name, frame)
-        
+
         # Display thermal camera in a separate window
         if self.show_thermal_overlay and self._last_thermal is not None:
             cv2.imshow("Thermal Camera", self._last_thermal)
@@ -158,11 +201,69 @@ class Visualizer:
         elif key == ord('f'):
             self.show_fire_overlay = not self.show_fire_overlay
             logger.info("Fire overlay: %s", "ON" if self.show_fire_overlay else "OFF")
+        elif key == ord('p'):
+            self.show_grid_overlay = not self.show_grid_overlay
+            logger.info("Grid overlay: %s", "ON" if self.show_grid_overlay else "OFF")
 
         return key
 
+    def _draw_tracked_persons(
+        self,
+        frame: np.ndarray,
+        tracking_result: TrackingResult,
+        fusion_result: FusionResult,
+    ):
+        """Draw tracked persons with persistent track IDs."""
+        # Build a map of detection bbox → PersonAnalysis for fire info
+        person_analysis_map = {}
+        for pa in fusion_result.persons:
+            person_analysis_map[pa.detection.bbox] = pa
+
+        for tracked in tracking_result.tracked_persons:
+            if not tracked.is_confirmed:
+                continue
+
+            # Check if this tracked person is in fire
+            in_fire = False
+            max_temp = 0.0
+            if tracked.detection:
+                pa = person_analysis_map.get(tracked.detection.bbox)
+                if pa:
+                    in_fire = pa.in_fire
+                    max_temp = pa.max_temp
+
+            # Choose color based on track ID
+            track_color = self.TRACK_COLORS[tracked.track_id % len(self.TRACK_COLORS)]
+
+            if in_fire:
+                color = HUMAN_IN_FIRE_COLOR
+                label = f"ID:{tracked.track_id} FIRE! {max_temp:.0f}°C"
+                thickness = 3
+
+                # Flashing effect
+                if int(time.time() * 4) % 2 == 0:
+                    x1, y1, x2, y2 = tracked.bbox
+                    cv2.rectangle(frame, (x1, y1 - 30), (x2, y1), (0, 0, 200), -1)
+            else:
+                color = track_color
+                label = f"ID:{tracked.track_id} ({tracked.confidence:.2f})"
+                if max_temp > 0:
+                    label += f" {max_temp:.0f}°C"
+                thickness = 2
+
+            self._draw_bbox(frame, tracked.bbox, label, color, thickness)
+
+            # Draw small track ID circle at top-left of bbox
+            x1, y1, _, _ = tracked.bbox
+            cv2.circle(frame, (x1 + 10, y1 - 15), 8, track_color, -1)
+            cv2.putText(
+                frame, str(tracked.track_id),
+                (x1 + 5, y1 - 11),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA,
+            )
+
     def _draw_person(self, frame: np.ndarray, person: PersonAnalysis):
-        """Draw a person bounding box with thermal info."""
+        """Draw a person bounding box with thermal info (fallback without tracking)."""
         if person.in_fire:
             color = HUMAN_IN_FIRE_COLOR
             label = f"HUMAN IN FIRE! max={person.max_temp:.0f}°C"
@@ -195,6 +296,86 @@ class Visualizer:
             cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 180), -1)
             cv2.addWeighted(overlay, 0.2, frame, 0.8, 0, frame)
 
+    def _draw_ir_indicators(self, frame: np.ndarray, ir_obstacles: ObstaclePacket):
+        """
+        Draw directional IR obstacle indicators on the frame edges.
+
+        Renders 4 triangular indicators (front/back/left/right) that
+        are red when an obstacle is detected and green when clear.
+        """
+        h, w = frame.shape[:2]
+        indicator_size = 30
+
+        indicators = [
+            # (obstacle_flag, center_x, center_y, direction_label)
+            (ir_obstacles.front, w // 2, indicator_size, "F"),
+            (ir_obstacles.back, w // 2, h - indicator_size, "B"),
+            (ir_obstacles.left, indicator_size, h // 2, "L"),
+            (ir_obstacles.right, w - indicator_size, h // 2, "R"),
+        ]
+
+        for obstacle, cx, cy, label in indicators:
+            color = (0, 0, 255) if obstacle else (0, 180, 0)
+            bg_color = (0, 0, 100) if obstacle else (0, 80, 0)
+
+            # Draw filled circle indicator
+            cv2.circle(frame, (cx, cy), indicator_size // 2, bg_color, -1)
+            cv2.circle(frame, (cx, cy), indicator_size // 2, color, 2)
+
+            # Draw direction letter
+            text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
+            tx = cx - text_size[0] // 2
+            ty = cy + text_size[1] // 2
+            cv2.putText(
+                frame, label, (tx, ty),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA,
+            )
+
+            # Status text below/beside indicator
+            status = "BLOCKED" if obstacle else "CLEAR"
+            if label in ("F", "B"):
+                cv2.putText(
+                    frame, status,
+                    (cx - 25, cy + (25 if label == "F" else -15)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35,
+                    color, 1, cv2.LINE_AA,
+                )
+
+    def _draw_grid_overlay(self, frame: np.ndarray, grid_img: np.ndarray):
+        """Draw the pathfinding grid in the bottom-right corner of the frame."""
+        h, w = frame.shape[:2]
+        gh, gw = grid_img.shape[:2]
+
+        # Scale grid to fit in corner (max 300x300)
+        max_size = 300
+        scale = min(max_size / gw, max_size / gh)
+        new_w = int(gw * scale)
+        new_h = int(gh * scale)
+        grid_resized = cv2.resize(grid_img, (new_w, new_h))
+
+        # Position in bottom-right with padding
+        padding = 10
+        x1 = w - new_w - padding
+        y1 = h - new_h - padding - 40  # Above status bar
+        x2 = x1 + new_w
+        y2 = y1 + new_h
+
+        if x1 >= 0 and y1 >= 0:
+            # Semi-transparent background
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (x1 - 2, y1 - 20), (x2 + 2, y2 + 2), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+
+            # Draw grid
+            frame[y1:y2, x1:x2] = grid_resized
+
+            # Label
+            cv2.putText(
+                frame, "Pathfinder Grid",
+                (x1, y1 - 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA,
+            )
+
     def _draw_bbox(
         self,
         frame: np.ndarray,
@@ -224,6 +405,8 @@ class Visualizer:
         frame_id: int,
         detections: DetectionResult,
         fusion_result: FusionResult,
+        tracking_result: Optional[TrackingResult] = None,
+        ir_obstacles: Optional[ObstaclePacket] = None,
     ):
         """Draw status bar at the bottom of the frame."""
         bar_height = 40
@@ -254,33 +437,49 @@ class Visualizer:
 
         # FPS
         cv2.putText(
-            frame, f"FPS: {self._fps:.0f}", (250, bar_y + 28),
-            font, 0.6, (200, 200, 200), 1, cv2.LINE_AA,
+            frame, f"FPS: {self._fps:.0f}", (220, bar_y + 28),
+            font, 0.5, (200, 200, 200), 1, cv2.LINE_AA,
         )
 
         # Frame ID
         cv2.putText(
-            frame, f"Frame: {frame_id}", (400, bar_y + 28),
-            font, 0.6, (200, 200, 200), 1, cv2.LINE_AA,
-        )
-
-        # Detection counts
-        stats_text = (
-            f"Persons: {len(fusion_result.persons)} | "
-            f"Fire: {len(fusion_result.fire_zones)} | "
-            f"Obstacles: {len(detections.obstacles)} | "
-            f"In-Fire: {fusion_result.humans_in_fire}"
-        )
-        cv2.putText(
-            frame, stats_text, (550, bar_y + 28),
+            frame, f"Frame: {frame_id}", (330, bar_y + 28),
             font, 0.5, (200, 200, 200), 1, cv2.LINE_AA,
         )
 
-        # YOLO inference time
+        # Detection + tracking counts
+        track_count = tracking_result.confirmed_tracks if tracking_result else 0
+        stats_text = (
+            f"Persons: {len(fusion_result.persons)} | "
+            f"Tracks: {track_count} | "
+            f"Fire: {len(fusion_result.fire_zones)} | "
+            f"Obs: {len(detections.obstacles)} | "
+            f"InFire: {fusion_result.humans_in_fire}"
+        )
         cv2.putText(
-            frame, f"YOLO: {detections.inference_time_ms:.0f}ms",
-            (1100, bar_y + 28),
-            font, 0.5, (150, 150, 150), 1, cv2.LINE_AA,
+            frame, stats_text, (470, bar_y + 28),
+            font, 0.4, (200, 200, 200), 1, cv2.LINE_AA,
+        )
+
+        # IR status (compact)
+        if ir_obstacles:
+            ir_text = (
+                f"IR: {'F' if ir_obstacles.front else '-'}"
+                f"{'B' if ir_obstacles.back else '-'}"
+                f"{'L' if ir_obstacles.left else '-'}"
+                f"{'R' if ir_obstacles.right else '-'}"
+            )
+            ir_color = (0, 0, 255) if ir_obstacles.front else (0, 180, 0)
+            cv2.putText(
+                frame, ir_text, (950, bar_y + 28),
+                font, 0.5, ir_color, 1, cv2.LINE_AA,
+            )
+
+        # RF-DETR inference time
+        cv2.putText(
+            frame, f"RF-DETR: {detections.inference_time_ms:.0f}ms",
+            (1080, bar_y + 28),
+            font, 0.45, (150, 150, 150), 1, cv2.LINE_AA,
         )
 
     def _apply_overlay(
@@ -324,6 +523,8 @@ class Visualizer:
         fusion_result: FusionResult,
         detections: DetectionResult,
         command_code: int,
+        tracking_result: Optional[TrackingResult] = None,
+        ir_obstacles: Optional[ObstaclePacket] = None,
     ):
         """Generate structured JSON output for the frame."""
         output = {
@@ -338,6 +539,16 @@ class Visualizer:
                     "confidence": p.detection.confidence,
                 }
                 for p in fusion_result.persons
+            ],
+            "tracked_persons": [
+                {
+                    "track_id": t.track_id,
+                    "bbox": list(t.bbox),
+                    "confidence": t.confidence,
+                    "confirmed": t.is_confirmed,
+                    "age": t.age,
+                }
+                for t in (tracking_result.tracked_persons if tracking_result else [])
             ],
             "fire_zones": [
                 {
@@ -356,9 +567,17 @@ class Visualizer:
                 }
                 for o in detections.obstacles
             ],
+            "ir_sensors": {
+                "front": ir_obstacles.front if ir_obstacles else None,
+                "back": ir_obstacles.back if ir_obstacles else None,
+                "left": ir_obstacles.left if ir_obstacles else None,
+                "right": ir_obstacles.right if ir_obstacles else None,
+            } if ir_obstacles else None,
             "command_sent": command_code,
             "command_name": COMMAND_NAMES.get(command_code, "UNKNOWN"),
             "inference_time_ms": detections.inference_time_ms,
+            "tracking_time_ms": tracking_result.tracking_time_ms if tracking_result else 0,
+            "active_tracks": tracking_result.active_tracks if tracking_result else 0,
             "fps": round(self._fps, 1),
         }
 

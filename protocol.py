@@ -22,7 +22,7 @@ import numpy as np
 from config import (
     MAGIC_NUMBER, HEADER_SIZE, METADATA_SIZE,
     THERMAL_PIXELS, THERMAL_WIDTH, THERMAL_HEIGHT,
-    MAX_PACKET_SIZE,
+    MAX_PACKET_SIZE, OBSTACLE_MAGIC,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 HEADER_FMT = "!IIQ"           # magic(uint32) + frame_id(uint32) + timestamp(uint64)
 METADATA_FMT = "!HHHH"        # rgb_w, rgb_h, therm_w, therm_h (uint16 each)
 COMMAND_FMT = "!IIQB"         # header + command_code(uint8)
+OBSTACLE_FMT = "!IIQBBBB"     # magic(4) + frame_id(4) + timestamp(8) + front/back/left/right(1 each)
 
 
 @dataclass
@@ -52,6 +53,17 @@ class CommandPacket:
     frame_id: int
     timestamp_ms: int
     command_code: int
+
+
+@dataclass
+class ObstaclePacket:
+    """IR proximity sensor obstacle data from the drone."""
+    frame_id: int
+    timestamp_ms: int
+    front: bool     # True = obstacle detected in front
+    back: bool      # True = obstacle detected behind
+    left: bool      # True = obstacle detected on left
+    right: bool     # True = obstacle detected on right
 
 
 def current_timestamp_ms() -> int:
@@ -249,3 +261,63 @@ def parse_fragment_header(data: bytes) -> Optional[tuple[int, int, bytes]]:
     if len(payload) != length:
         return None
     return total, index, payload
+
+
+# =============================================================================
+# Obstacle Packet Encoding / Decoding (Pi IR sensors → Ground Station)
+# =============================================================================
+
+def encode_obstacle_packet(
+    frame_id: int, front: bool, back: bool, left: bool, right: bool
+) -> bytes:
+    """
+    Encode IR proximity sensor data into an obstacle packet.
+
+    Layout: [OBSTACLE_MAGIC 4B][frame_id 4B][timestamp 8B][front 1B][back 1B][left 1B][right 1B]
+    Total: 20 bytes.
+    """
+    return struct.pack(
+        OBSTACLE_FMT,
+        OBSTACLE_MAGIC,
+        frame_id,
+        current_timestamp_ms(),
+        int(front),
+        int(back),
+        int(left),
+        int(right),
+    )
+
+
+def decode_obstacle_packet(data: bytes) -> Optional[ObstaclePacket]:
+    """
+    Decode raw bytes into an ObstaclePacket.
+
+    Returns None if the packet is corrupted or has wrong magic.
+    """
+    expected_size = struct.calcsize(OBSTACLE_FMT)
+    if len(data) < expected_size:
+        logger.warning("Obstacle packet too small: %d bytes", len(data))
+        return None
+
+    try:
+        magic, frame_id, timestamp_ms, front, back, left, right = struct.unpack(
+            OBSTACLE_FMT, data[:expected_size]
+        )
+        if magic != OBSTACLE_MAGIC:
+            logger.warning(
+                "Invalid obstacle magic: 0x%08X (expected 0x%08X)",
+                magic, OBSTACLE_MAGIC,
+            )
+            return None
+
+        return ObstaclePacket(
+            frame_id=frame_id,
+            timestamp_ms=timestamp_ms,
+            front=bool(front),
+            back=bool(back),
+            left=bool(left),
+            right=bool(right),
+        )
+    except struct.error as e:
+        logger.warning("Failed to decode obstacle packet: %s", e)
+        return None

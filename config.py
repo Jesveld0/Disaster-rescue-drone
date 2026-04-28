@@ -82,13 +82,12 @@ TIMEOUT_SEC = TIMEOUT_MS / 1000.0    # 0.5 s
 JPEG_QUALITY = 80  # Produces ~80-120 KB at 720p
 
 # =============================================================================
-# AI Model Configuration
+# AI Model Configuration — RF-DETR
 # =============================================================================
-YOLO_MODEL_PATH = "yolov8n.pt"        # YOLOv8 nano — download auto on first run
-YOLO_CONFIDENCE = 0.4                 # Minimum detection confidence
-YOLO_IOU_THRESHOLD = 0.45            # NMS IoU threshold
+RFDETR_MODEL_SIZE = "base"            # 'base', 'small', or 'large'
+RFDETR_CONFIDENCE = 0.4               # Minimum detection confidence
 
-# YOLO class mapping (COCO classes we care about)
+# COCO class mapping (RF-DETR uses standard COCO 80 classes)
 PERSON_CLASS_ID = 0
 # Fire and obstacle classes will come from custom model or be mapped separately
 FIRE_CLASS_LABEL = "fire"
@@ -99,6 +98,35 @@ OBSTACLE_CLASSES = ["car", "truck", "bus", "motorcycle", "bicycle",
 MIDAS_MODEL_TYPE = "MiDaS_small"      # Lightweight for real-time
 OBSTACLE_DEPTH_THRESHOLD = 3.0        # meters — trigger STOP if closer
 OBSTACLE_BBOX_AREA_RATIO = 0.15       # bbox area / frame area threshold
+
+# =============================================================================
+# Human Tracking (DeepSORT)
+# =============================================================================
+TRACKER_MAX_AGE = 30                  # Frames to keep unmatched track alive
+TRACKER_N_INIT = 3                    # Hits before track is confirmed
+TRACKER_MAX_IOU_DISTANCE = 0.7        # Max IoU distance for matching
+
+# =============================================================================
+# IR Proximity Sensors (Raspberry Pi GPIO — BCM numbering)
+# =============================================================================
+IR_FRONT_PIN = 17
+IR_BACK_PIN = 27
+IR_LEFT_PIN = 22
+IR_RIGHT_PIN = 23
+IR_POLL_INTERVAL = 0.05               # 50ms polling interval
+IR_DEBOUNCE_COUNT = 3                 # Consecutive reads to confirm obstacle
+
+# Obstacle Protocol
+OBSTACLE_MAGIC = 0x4F425354           # "OBST" in ASCII hex
+OBSTACLE_PORT = 5002                  # Separate UDP port for obstacle data
+
+# =============================================================================
+# Pathfinding (A*)
+# =============================================================================
+GRID_WIDTH = 20                       # Grid columns
+GRID_HEIGHT = 20                      # Grid rows
+GRID_CELL_SIZE = 0.5                  # Meters per cell
+OBSTACLE_DECAY_FRAMES = 10            # Frames before obstacle cell fades
 
 # =============================================================================
 # Homography Calibration (Thermal → RGB alignment)

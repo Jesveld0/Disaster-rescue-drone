@@ -3,8 +3,11 @@ pipeline.py — Threaded real-time pipeline for the ground station.
 
 Orchestrates all modules into a 3-thread pipeline:
     Thread 1 (Receive):   UDP recv → decode → queue
-    Thread 2 (Inference): queue → YOLO + thermal + depth → fusion → decision
+    Thread 2 (Inference): queue → RF-DETR + tracker + thermal + depth + pathfinding → fusion → decision
     Thread 3 (Display):   render annotated frame → show + JSON output
+
+All AI processing (RF-DETR detection, DeepSORT tracking, MiDaS depth,
+thermal fusion, A* pathfinding) runs on the ground station.
 
 Usage:
     python -m ground_station.pipeline
@@ -18,7 +21,7 @@ import signal
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import cv2
@@ -28,20 +31,23 @@ import numpy as np
 sys.path.insert(0, ".")
 
 from config import (
-    DATA_PORT, COMMAND_PORT, TARGET_FPS,
+    DATA_PORT, COMMAND_PORT, OBSTACLE_PORT, TARGET_FPS,
     CMD_STOP, CMD_SAFE, COMMAND_NAMES,
     RGB_WIDTH, RGB_HEIGHT,
 )
-from protocol import FramePacket
+from protocol import FramePacket, ObstaclePacket
 from ground_station.receiver import FrameReceiver
 from ground_station.decoder import FrameDecoder
 from ground_station.thermal_processing import ThermalProcessor
-from ground_station.detector import YOLODetector, DetectionResult
+from ground_station.detector import RFDETRDetector, DetectionResult
+from ground_station.tracker import HumanTracker, TrackingResult
 from ground_station.depth_estimator import DepthEstimator
 from ground_station.fusion import ThermalFusion, FusionResult
 from ground_station.decision import DecisionEngine
 from ground_station.command_sender import CommandSender
 from ground_station.visualizer import Visualizer
+from ground_station.obstacle_receiver import ObstacleReceiver
+from ground_station.pathfinder import OccupancyGrid, AStarPathfinder
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +68,13 @@ class InferenceResult:
     detections: DetectionResult
     fusion_result: FusionResult
     command_code: int
-    thermal_data: dict           # From ThermalProcessor.process()
+    thermal_data: dict                                      # From ThermalProcessor.process()
     depth_map: Optional[np.ndarray] = None
     depth_colormap: Optional[np.ndarray] = None
+    tracking_result: Optional[TrackingResult] = None        # DeepSORT tracking
+    ir_obstacles: Optional[ObstaclePacket] = None           # IR sensor data
+    path: list[tuple[int, int]] = field(default_factory=list)  # A* path
+    grid_overlay: Optional[np.ndarray] = None               # Pathfinding grid image
 
 
 class Pipeline:
@@ -73,27 +83,36 @@ class Pipeline:
 
     Architecture:
         [UDP Receiver] → decode_queue → [Inference Thread] → display_queue → [Display Thread]
+        [Obstacle Receiver] → latest IR data → [Inference Thread]
 
-    All threads are coordinated via thread-safe queues with size limits
-    to prevent memory buildup when inference is slower than receive.
+    All AI inference (RF-DETR, DeepSORT, MiDaS, A*) runs on the ground station.
+    The drone only sends raw frames + IR sensor data.
     """
 
     def __init__(
         self,
         data_port: int = DATA_PORT,
         command_port: int = COMMAND_PORT,
+        obstacle_port: int = OBSTACLE_PORT,
         enable_depth: bool = True,
         enable_display: bool = True,
+        enable_tracking: bool = True,
+        enable_pathfinding: bool = True,
     ):
         """
         Args:
             data_port: UDP port for receiving frame data.
             command_port: UDP port for sending commands.
+            obstacle_port: UDP port for receiving IR obstacle data.
             enable_depth: Enable MiDaS depth estimation (requires GPU memory).
             enable_display: Enable OpenCV display window.
+            enable_tracking: Enable DeepSORT human tracking.
+            enable_pathfinding: Enable A* pathfinding with occupancy grid.
         """
         self.enable_depth = enable_depth
         self.enable_display = enable_display
+        self.enable_tracking = enable_tracking
+        self.enable_pathfinding = enable_pathfinding
 
         # Queues between stages (small to keep latency low)
         self._decode_queue: queue.Queue[DecodedFrame] = queue.Queue(maxsize=3)
@@ -106,12 +125,20 @@ class Pipeline:
         )
         self.decoder = FrameDecoder()
         self.thermal_processor = ThermalProcessor()
-        self.detector = YOLODetector()
+        self.detector = RFDETRDetector()
+        self.tracker = HumanTracker() if enable_tracking else None
         self.depth_estimator = DepthEstimator() if enable_depth else None
         self.fusion = ThermalFusion(self.thermal_processor)
         self.decision = DecisionEngine(self.depth_estimator)
         self.command_sender = CommandSender(command_port=command_port)
         self.visualizer = Visualizer() if enable_display else None
+
+        # IR obstacle receiver
+        self.obstacle_receiver = ObstacleReceiver(port=obstacle_port)
+
+        # Pathfinding
+        self.occupancy_grid = OccupancyGrid() if enable_pathfinding else None
+        self.pathfinder = AStarPathfinder() if enable_pathfinding else None
 
         # Control
         self._running = False
@@ -122,20 +149,26 @@ class Pipeline:
         logger.info("=" * 60)
         logger.info("  Fire Rescue Drone — Ground Station Pipeline")
         logger.info("=" * 60)
-        logger.info("Data port: %d | Command port: %d", DATA_PORT, COMMAND_PORT)
+        logger.info("Data port: %d | Command port: %d | Obstacle port: %d",
+                     DATA_PORT, COMMAND_PORT, OBSTACLE_PORT)
         logger.info("Depth estimation: %s", "ENABLED" if self.enable_depth else "DISABLED")
+        logger.info("Human tracking: %s", "ENABLED" if self.enable_tracking else "DISABLED")
+        logger.info("Pathfinding: %s", "ENABLED" if self.enable_pathfinding else "DISABLED")
         logger.info("Display: %s", "ENABLED" if self.enable_display else "DISABLED")
-        logger.info("YOLO loaded: %s | Device: %s",
+        logger.info("RF-DETR loaded: %s | Device: %s",
                      self.detector.is_loaded,
                      self.detector.device if self.detector.is_loaded else "N/A")
+        if self.tracker:
+            logger.info("DeepSORT tracker: %s", "READY" if self.tracker.is_loaded else "FAILED")
         if self.depth_estimator:
             logger.info("MiDaS loaded: %s", self.depth_estimator.is_loaded)
         logger.info("=" * 60)
 
         self._running = True
 
-        # Start receiver (has its own background thread)
+        # Start receivers
         self.receiver.start()
+        self.obstacle_receiver.start()
 
         # Start pipeline threads
         self._threads = [
@@ -205,8 +238,9 @@ class Pipeline:
         """
         Stage 2: Run AI inference on decoded frames.
 
-        Performs YOLO detection, thermal processing, depth estimation,
-        fusion analysis, and decision-making.
+        Performs RF-DETR detection, DeepSORT tracking, thermal processing,
+        depth estimation, A* pathfinding, fusion analysis, and decision-making.
+        All processing happens on the ground station.
         """
         logger.info("Inference stage started")
 
@@ -225,8 +259,13 @@ class Pipeline:
                 # Thermal processing
                 thermal_data = self.thermal_processor.process(decoded.thermal_gray)
 
-                # YOLO detection
+                # RF-DETR detection (replaces YOLOv8)
                 detections = self.detector.detect(decoded.rgb_bgr)
+
+                # DeepSORT human tracking
+                tracking_result = None
+                if self.tracker and self.tracker.is_loaded:
+                    tracking_result = self.tracker.update(detections, decoded.rgb_bgr)
 
                 # Depth estimation (optional)
                 depth_map = None
@@ -236,6 +275,39 @@ class Pipeline:
                     if depth_map is not None:
                         depth_colormap = self.depth_estimator.get_depth_colormap(depth_map)
 
+                # Get latest IR obstacle data
+                ir_obstacles = self.obstacle_receiver.get_latest()
+
+                # Pathfinding
+                path = []
+                grid_overlay = None
+                if self.occupancy_grid and self.pathfinder:
+                    # Update grid from IR sensors
+                    if ir_obstacles:
+                        self.occupancy_grid.update_from_ir({
+                            "front": ir_obstacles.front,
+                            "back": ir_obstacles.back,
+                            "left": ir_obstacles.left,
+                            "right": ir_obstacles.right,
+                        })
+
+                    # Update grid from visual detections
+                    self.occupancy_grid.update_from_detections(detections.obstacles)
+
+                    # Compute path
+                    path_result = self.pathfinder.find_path(self.occupancy_grid)
+                    path = path_result.path
+
+                    # Render grid with path
+                    grid_img = self.occupancy_grid.render()
+                    if path:
+                        grid_overlay = self.pathfinder.render_path(grid_img, path)
+                    else:
+                        grid_overlay = grid_img
+
+                    # Decay obstacles for next frame
+                    self.occupancy_grid.decay()
+
                 # Thermal-RGB fusion
                 fusion_result = self.fusion.analyze(
                     detections,
@@ -243,9 +315,10 @@ class Pipeline:
                     thermal_data["fire_mask"],
                 )
 
-                # Decision: generate command
+                # Decision: generate command (now includes IR obstacle data)
                 command_code = self.decision.evaluate(
-                    fusion_result, detections, depth_map
+                    fusion_result, detections, depth_map,
+                    ir_obstacles=ir_obstacles,
                 )
 
                 # Send command to drone
@@ -262,6 +335,10 @@ class Pipeline:
                     thermal_data=thermal_data,
                     depth_map=depth_map,
                     depth_colormap=depth_colormap,
+                    tracking_result=tracking_result,
+                    ir_obstacles=ir_obstacles,
+                    path=path,
+                    grid_overlay=grid_overlay,
                 )
 
                 # Push to display queue
@@ -309,6 +386,9 @@ class Pipeline:
                     thermal_colormap=result.thermal_data.get("colormap"),
                     fire_mask=result.thermal_data.get("fire_mask"),
                     depth_colormap=result.depth_colormap,
+                    tracking_result=result.tracking_result,
+                    ir_obstacles=result.ir_obstacles,
+                    grid_overlay=result.grid_overlay,
                 )
 
                 # Show and handle keyboard
@@ -330,14 +410,29 @@ class Pipeline:
                 try:
                     result = self._display_queue.get(timeout=0.1)
                     cmd_name = COMMAND_NAMES.get(result.command_code, "UNKNOWN")
+                    track_count = (
+                        result.tracking_result.confirmed_tracks
+                        if result.tracking_result else 0
+                    )
+                    ir_status = "N/A"
+                    if result.ir_obstacles:
+                        ir_status = (
+                            f"F={'Y' if result.ir_obstacles.front else 'N'} "
+                            f"B={'Y' if result.ir_obstacles.back else 'N'} "
+                            f"L={'Y' if result.ir_obstacles.left else 'N'} "
+                            f"R={'Y' if result.ir_obstacles.right else 'N'}"
+                        )
                     logger.info(
-                        "Frame %d | CMD: %s | Persons: %d | Fire: %d | Obstacles: %d | "
-                        "YOLO: %.0fms",
+                        "Frame %d | CMD: %s | Persons: %d | Tracks: %d | "
+                        "Fire: %d | Obstacles: %d | IR: %s | "
+                        "RF-DETR: %.0fms",
                         result.frame.frame_id,
                         cmd_name,
                         len(result.fusion_result.persons),
+                        track_count,
                         len(result.fusion_result.fire_zones),
                         len(result.detections.obstacles),
+                        ir_status,
                         result.detections.inference_time_ms,
                     )
                 except queue.Empty:
@@ -385,6 +480,7 @@ class Pipeline:
             t.join(timeout=3.0)
 
         self.receiver.stop()
+        self.obstacle_receiver.stop()
         self.command_sender.close()
         if self.visualizer:
             self.visualizer.close()
@@ -406,8 +502,20 @@ def main():
         help=f"UDP command port (default: {COMMAND_PORT})",
     )
     parser.add_argument(
+        "--obstacle-port", type=int, default=OBSTACLE_PORT,
+        help=f"UDP obstacle data port (default: {OBSTACLE_PORT})",
+    )
+    parser.add_argument(
         "--no-depth", action="store_true",
         help="Disable MiDaS depth estimation (saves GPU memory)",
+    )
+    parser.add_argument(
+        "--no-tracking", action="store_true",
+        help="Disable DeepSORT human tracking",
+    )
+    parser.add_argument(
+        "--no-pathfinding", action="store_true",
+        help="Disable A* pathfinding and occupancy grid",
     )
     parser.add_argument(
         "--headless", action="store_true",
@@ -428,8 +536,11 @@ def main():
     pipeline = Pipeline(
         data_port=args.port,
         command_port=args.command_port,
+        obstacle_port=args.obstacle_port,
         enable_depth=not args.no_depth,
         enable_display=not args.headless,
+        enable_tracking=not args.no_tracking,
+        enable_pathfinding=not args.no_pathfinding,
     )
 
     def signal_handler(sig, frame):

@@ -1,7 +1,8 @@
 """
 decision.py — Command decision engine for the ground station.
 
-Evaluates fusion results and generates the appropriate command for the drone.
+Evaluates fusion results, IR obstacle data, and generates the
+appropriate command for the drone.
 Priority order: HUMAN_IN_FIRE > FIRE_ALERT > STOP > SLOW > SAFE
 
 Fail-safe: defaults to STOP if no valid inference within 500ms.
@@ -19,6 +20,7 @@ from config import (
 from ground_station.fusion import FusionResult
 from ground_station.detector import DetectionResult
 from ground_station.depth_estimator import DepthEstimator
+from protocol import ObstaclePacket
 
 import numpy as np
 
@@ -31,6 +33,9 @@ class DecisionEngine:
 
     Evaluates multiple threat levels and selects the highest-priority command:
         HUMAN_IN_FIRE (4) > FIRE_ALERT (3) > STOP (2) > SLOW (1) > SAFE (0)
+
+    Now integrates IR proximity sensor data for real hardware obstacle detection.
+    IR front obstacle triggers immediate STOP (highest physical danger).
 
     Includes fail-safe: if no inference result arrives within 500ms,
     automatically issues STOP.
@@ -50,14 +55,16 @@ class DecisionEngine:
         fusion_result: FusionResult,
         detections: DetectionResult,
         depth_map: Optional[np.ndarray] = None,
+        ir_obstacles: Optional[ObstaclePacket] = None,
     ) -> int:
         """
         Evaluate all perception data and decide on a command.
 
         Args:
             fusion_result: Thermal-RGB fusion analysis.
-            detections: Raw YOLO detection results.
+            detections: Raw detection results.
             depth_map: Optional MiDaS depth map for obstacle proximity.
+            ir_obstacles: Optional IR proximity sensor data from the drone.
 
         Returns:
             Command code (0-4).
@@ -77,12 +84,24 @@ class DecisionEngine:
         if fusion_result.any_fire:
             command = max(command, CMD_FIRE_ALERT)
 
-        # Priority 3: Obstacle STOP
+        # Priority 3a: IR proximity STOP (hardware sensors — highest obstacle priority)
+        if ir_obstacles is not None:
+            ir_stop = self._check_ir_stop(ir_obstacles)
+            if ir_stop:
+                command = max(command, CMD_STOP)
+
+        # Priority 3b: Visual/depth obstacle STOP
         obstacle_stop = self._check_obstacles(detections, depth_map)
         if obstacle_stop:
             command = max(command, CMD_STOP)
 
-        # Priority 4: Obstacle SLOW (close but not critical)
+        # Priority 4a: IR proximity SLOW (side/back obstacles)
+        if ir_obstacles is not None and command < CMD_STOP:
+            ir_slow = self._check_ir_slow(ir_obstacles)
+            if ir_slow:
+                command = max(command, CMD_SLOW)
+
+        # Priority 4b: Visual obstacle SLOW (close but not critical)
         obstacle_slow = self._check_obstacles_slow(detections, depth_map)
         if obstacle_slow and command < CMD_STOP:
             command = max(command, CMD_SLOW)
@@ -96,6 +115,40 @@ class DecisionEngine:
             )
 
         return command
+
+    def _check_ir_stop(self, ir_obstacles: ObstaclePacket) -> bool:
+        """
+        Check if IR sensors indicate a critical front obstacle.
+
+        Front obstacle is the most dangerous (drone flying into something).
+        """
+        if ir_obstacles.front:
+            logger.warning(
+                "⚠️  IR STOP: Front obstacle detected by proximity sensor!"
+            )
+            return True
+        return False
+
+    def _check_ir_slow(self, ir_obstacles: ObstaclePacket) -> bool:
+        """
+        Check if IR sensors indicate nearby side/back obstacles.
+
+        Side and back obstacles warrant SLOW but not STOP.
+        """
+        if ir_obstacles.back or ir_obstacles.left or ir_obstacles.right:
+            directions = []
+            if ir_obstacles.back:
+                directions.append("back")
+            if ir_obstacles.left:
+                directions.append("left")
+            if ir_obstacles.right:
+                directions.append("right")
+            logger.info(
+                "IR SLOW: Obstacle detected at: %s",
+                ", ".join(directions),
+            )
+            return True
+        return False
 
     def check_failsafe(self) -> Optional[int]:
         """

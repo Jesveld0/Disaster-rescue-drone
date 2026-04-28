@@ -138,7 +138,7 @@ class HumanTracker:
 
             # Process tracked objects
             for track in tracks:
-                track_id = track.track_id
+                track_id = int(track.track_id)   # deep-sort-realtime returns str; cast to int
                 is_confirmed = track.is_confirmed()
 
                 # Get bounding box in (left, top, right, bottom) format

@@ -84,8 +84,10 @@ JPEG_QUALITY = 65  # ~30-50 KB at 640x480 — good balance of quality vs bandwid
 # =============================================================================
 # AI Model Configuration — RF-DETR
 # =============================================================================
-RFDETR_MODEL_SIZE = "base"            # 'base', 'small', or 'large'
-RFDETR_CONFIDENCE = 0.3               # Minimum detection confidence (lower = more sensitive)
+RFDETR_MODEL_SIZE = "large"           # large gives the best accuracy; XL/2XL require rfdetr[plus]
+RFDETR_CONFIDENCE = 0.3               # General detection threshold
+RFDETR_PERSON_CONFIDENCE = 0.2        # Lower threshold just for persons — maximise recall
+RFDETR_RESOLUTION = 840              # Input resolution (must be divisible by 56); higher = better small-object detection
 
 # COCO class mapping
 # RF-DETR uses 1-indexed COCO class IDs (person = 1, not 0)

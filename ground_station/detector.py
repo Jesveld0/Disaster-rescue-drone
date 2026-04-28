@@ -19,23 +19,19 @@ import torch
 from PIL import Image
 
 from config import (
-    RFDETR_MODEL_SIZE, RFDETR_CONFIDENCE,
-    PERSON_CLASS_ID, FIRE_CLASS_LABEL, OBSTACLE_CLASSES,
+    RFDETR_MODEL_SIZE, RFDETR_CONFIDENCE, RFDETR_PERSON_CONFIDENCE,
+    RFDETR_RESOLUTION, PERSON_CLASS_ID, FIRE_CLASS_LABEL, OBSTACLE_CLASSES,
 )
 
 logger = logging.getLogger(__name__)
 
 # Import RF-DETR (lazy to handle missing dependency gracefully)
 try:
-    from rfdetr import RFDETRBase
+    from rfdetr import RFDETRBase, RFDETRLarge
     try:
         from rfdetr import RFDETRSmall
     except ImportError:
         RFDETRSmall = None
-    try:
-        from rfdetr import RFDETRLarge
-    except ImportError:
-        RFDETRLarge = None
     from rfdetr.util.coco_classes import COCO_CLASSES
     HAS_RFDETR = True
 except ImportError:
@@ -86,9 +82,9 @@ class RFDETRDetector:
     }
 
     MODEL_CLASSES = {
-        "base": RFDETRBase if HAS_RFDETR else None,
-        "small": RFDETRSmall if HAS_RFDETR else None,
         "large": RFDETRLarge if HAS_RFDETR else None,
+        "base":  RFDETRBase  if HAS_RFDETR else None,
+        "small": RFDETRSmall if HAS_RFDETR else None,
     }
 
     def __init__(self, model_size: str = RFDETR_MODEL_SIZE, device: str = None):
@@ -118,26 +114,25 @@ class RFDETRDetector:
             model_cls = self.MODEL_CLASSES.get(self.model_size)
             if model_cls is None:
                 logger.warning(
-                    "RF-DETR '%s' not available, falling back to 'base'",
+                    "RF-DETR '%s' not available, falling back to 'large'",
                     self.model_size,
                 )
-                model_cls = RFDETRBase
+                model_cls = RFDETRLarge
 
             logger.info(
-                "Loading RF-DETR model: %s on %s",
-                model_cls.__name__, self.device,
+                "Loading RF-DETR model: %s | resolution=%d | device=%s",
+                model_cls.__name__, RFDETR_RESOLUTION, self.device,
             )
-            self.model = model_cls()
+            # resolution must be divisible by 56
+            self.model = model_cls(resolution=RFDETR_RESOLUTION)
 
-            # Warm up the model with a dummy inference
-            dummy = Image.fromarray(
-                np.zeros((640, 640, 3), dtype=np.uint8)
-            )
-            self.model.predict(dummy, threshold=RFDETR_CONFIDENCE)
+            # Warm up
+            dummy = Image.fromarray(np.zeros((RFDETR_RESOLUTION, RFDETR_RESOLUTION, 3), dtype=np.uint8))
+            self.model.predict(dummy, threshold=RFDETR_PERSON_CONFIDENCE)
 
             logger.info(
-                "RF-DETR model loaded successfully. COCO classes: %d, Device: %s",
-                len(COCO_CLASSES), self.device,
+                "RF-DETR loaded. COCO classes=%d | person_threshold=%.2f | general_threshold=%.2f",
+                len(COCO_CLASSES), RFDETR_PERSON_CONFIDENCE, RFDETR_CONFIDENCE,
             )
 
         except Exception as e:
@@ -148,11 +143,12 @@ class RFDETRDetector:
         """
         Run object detection on a BGR frame.
 
-        Args:
-            bgr_frame: OpenCV BGR image (H, W, 3).
+        Uses two confidence thresholds:
+        - RFDETR_PERSON_CONFIDENCE (0.2) for persons — maximise recall
+        - RFDETR_CONFIDENCE (0.3) for all other classes
 
-        Returns:
-            DetectionResult with categorized detections.
+        This means we run one inference at the lower person threshold and
+        filter each detection individually by category.
         """
         result = DetectionResult()
 
@@ -162,32 +158,31 @@ class RFDETRDetector:
         start = time.monotonic()
 
         try:
-            # Convert BGR to RGB PIL Image for RF-DETR
             rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(rgb_frame)
 
-            # Run inference — returns supervision.Detections object
+            # Single inference at the lower person threshold.
+            # Person detections that fall between RFDETR_PERSON_CONFIDENCE and
+            # RFDETR_CONFIDENCE would be missed if we only ran at the higher threshold.
             detections = self.model.predict(
                 pil_image,
-                threshold=RFDETR_CONFIDENCE,
+                threshold=RFDETR_PERSON_CONFIDENCE,
             )
 
-            inference_time = (time.monotonic() - start) * 1000
-            result.inference_time_ms = round(inference_time, 1)
+            result.inference_time_ms = round((time.monotonic() - start) * 1000, 1)
 
             if detections is None or len(detections) == 0:
                 return result
 
-            # Extract detection arrays from supervision.Detections
-            boxes = detections.xyxy            # (N, 4) numpy array
-            confidences = detections.confidence  # (N,) numpy array
-            class_ids = detections.class_id      # (N,) numpy array
+            boxes       = detections.xyxy
+            confidences = detections.confidence
+            class_ids   = detections.class_id
 
             for bbox, conf, cls_id in zip(boxes, confidences, class_ids):
                 x1, y1, x2, y2 = map(int, bbox)
                 cls_id = int(cls_id)
+                conf   = float(conf)
 
-                # Get class name from COCO classes
                 if 0 <= cls_id < len(COCO_CLASSES):
                     class_name = COCO_CLASSES[cls_id]
                 else:
@@ -198,20 +193,29 @@ class RFDETRDetector:
                     cls_id, class_name, conf,
                 )
 
+                category = self._categorize(class_name, cls_id)
+
+                # Apply per-category confidence gate
+                if category == "person":
+                    if conf < RFDETR_PERSON_CONFIDENCE:
+                        continue   # already filtered by model, but guard anyway
+                else:
+                    if conf < RFDETR_CONFIDENCE:   # stricter gate for non-persons
+                        continue
+
                 detection = Detection(
                     bbox=(x1, y1, x2, y2),
-                    confidence=float(conf),
+                    confidence=conf,
                     class_id=cls_id,
                     class_name=class_name,
-                    category=self._categorize(class_name, cls_id),
+                    category=category,
                 )
 
-                # Route to appropriate list
-                if detection.category == "person":
+                if category == "person":
                     result.persons.append(detection)
-                elif detection.category == "fire":
+                elif category == "fire":
                     result.fires.append(detection)
-                elif detection.category == "obstacle":
+                elif category == "obstacle":
                     result.obstacles.append(detection)
 
         except Exception as e:

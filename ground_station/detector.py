@@ -78,11 +78,11 @@ class RFDETRDetector:
     """
 
     # COCO class names that map to "obstacle" category
+    # Only physical outdoor obstacles the drone might collide with
     OBSTACLE_COCO_NAMES = {
         "car", "truck", "bus", "motorcycle", "bicycle",
-        "bench", "chair", "potted plant", "couch", "bed",
-        "dining table", "tv", "refrigerator", "oven",
-        "suitcase", "backpack",
+        "traffic light", "stop sign", "fire hydrant",
+        "suitcase", "umbrella",
     }
 
     MODEL_CLASSES = {
@@ -193,6 +193,11 @@ class RFDETRDetector:
                 else:
                     class_name = f"class_{cls_id}"
 
+                logger.debug(
+                    "Raw detection: id=%d name='%s' conf=%.2f",
+                    cls_id, class_name, conf,
+                )
+
                 detection = Detection(
                     bbox=(x1, y1, x2, y2),
                     confidence=float(conf),
@@ -219,20 +224,19 @@ class RFDETRDetector:
         """
         Categorize a detected class into person/fire/obstacle.
 
-        Args:
-            class_name: COCO class name string.
-            class_id: COCO class ID integer.
-
-        Returns:
-            Category string: 'person', 'fire', 'obstacle', or 'unknown'.
+        Checks class name first (robust across RF-DETR version differences
+        in whether COCO classes are 0-indexed or 1-indexed).
         """
-        if class_id == PERSON_CLASS_ID:
+        name = class_name.lower().strip()
+
+        # Person — check by name first, then by ID as fallback
+        if name == "person" or class_id == PERSON_CLASS_ID:
             return "person"
 
-        if class_name.lower() in ("fire", "flame", "smoke"):
+        if name in ("fire", "flame", "smoke"):
             return "fire"
 
-        if class_name.lower() in self.OBSTACLE_COCO_NAMES:
+        if name in self.OBSTACLE_COCO_NAMES:
             return "obstacle"
 
         return "unknown"

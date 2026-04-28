@@ -20,8 +20,8 @@ MAX_PACKET_SIZE = 8000                # Max payload per UDP fragment (safe for a
 # =============================================================================
 # Camera Configuration
 # =============================================================================
-RGB_WIDTH = 1280
-RGB_HEIGHT = 720
+RGB_WIDTH = 640
+RGB_HEIGHT = 480
 RGB_FPS = 30
 THERMAL_WIDTH = 32
 THERMAL_HEIGHT = 24
@@ -73,22 +73,23 @@ COMMAND_PRIORITY = [CMD_SAFE, CMD_SLOW, CMD_STOP, CMD_FIRE_ALERT, CMD_HUMAN_IN_F
 # =============================================================================
 # Performance Targets
 # =============================================================================
-TARGET_FPS = 20
-FRAME_INTERVAL = 1.0 / TARGET_FPS  # 50 ms
+TARGET_FPS = 30
+FRAME_INTERVAL = 1.0 / TARGET_FPS  # ~33 ms
 TIMEOUT_MS = 500                     # No-packet timeout → fail-safe STOP
 TIMEOUT_SEC = TIMEOUT_MS / 1000.0    # 0.5 s
 
-# JPEG compression quality (trade-off: size vs quality)
-JPEG_QUALITY = 80  # Produces ~80-120 KB at 720p
+# JPEG compression quality (lower = smaller packets = higher effective FPS)
+JPEG_QUALITY = 65  # ~30-50 KB at 640x480 — good balance of quality vs bandwidth
 
 # =============================================================================
 # AI Model Configuration — RF-DETR
 # =============================================================================
 RFDETR_MODEL_SIZE = "base"            # 'base', 'small', or 'large'
-RFDETR_CONFIDENCE = 0.4               # Minimum detection confidence
+RFDETR_CONFIDENCE = 0.3               # Minimum detection confidence (lower = more sensitive)
 
-# COCO class mapping (RF-DETR uses standard COCO 80 classes)
-PERSON_CLASS_ID = 0
+# COCO class mapping
+# RF-DETR uses 1-indexed COCO class IDs (person = 1, not 0)
+PERSON_CLASS_ID = 1
 # Fire and obstacle classes will come from custom model or be mapped separately
 FIRE_CLASS_LABEL = "fire"
 OBSTACLE_CLASSES = ["car", "truck", "bus", "motorcycle", "bicycle",

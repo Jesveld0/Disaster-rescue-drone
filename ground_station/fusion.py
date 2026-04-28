@@ -78,6 +78,8 @@ class ThermalFusion:
         detections: DetectionResult,
         temperatures: np.ndarray,
         fire_mask: np.ndarray,
+        depth_map: Optional[np.ndarray] = None,
+        depth_estimator: Optional[any] = None,
     ) -> FusionResult:
         """
         Perform full fusion analysis on a frame.
@@ -86,6 +88,8 @@ class ThermalFusion:
             detections: YOLO detection results.
             temperatures: Full-resolution temperature map (720, 1280) float32.
             fire_mask: Binary fire mask (720, 1280) uint8.
+            depth_map: Optional MiDaS relative depth map.
+            depth_estimator: Optional DepthEstimator instance.
 
         Returns:
             FusionResult with classified persons and fire zones.
@@ -94,7 +98,7 @@ class ThermalFusion:
 
         # Analyze each detected person
         for person_det in detections.persons:
-            analysis = self._analyze_person(person_det, temperatures)
+            analysis = self._analyze_person(person_det, temperatures, depth_map, depth_estimator)
             result.persons.append(analysis)
             if analysis.in_fire:
                 result.humans_in_fire += 1
@@ -118,20 +122,35 @@ class ThermalFusion:
         return result
 
     def _analyze_person(
-        self, detection: Detection, temperatures: np.ndarray
+        self, 
+        detection: Detection, 
+        temperatures: np.ndarray,
+        depth_map: Optional[np.ndarray] = None,
+        depth_estimator: Optional[any] = None,
     ) -> PersonAnalysis:
         """
         Analyze thermal conditions for a detected person.
 
-        Applies the HUMAN_IN_FIRE decision rule.
+        Applies the HUMAN_IN_FIRE decision rule, with dynamic thresholds based on depth.
         """
         stats = self.thermal_processor.extract_region_temps(
             temperatures, detection.bbox
         )
 
+        temp_threshold = FIRE_THRESHOLD_TEMP
+        ratio_threshold = HOT_PIXEL_RATIO_THRESHOLD
+
+        # If person is beyond the thermal camera's reliable range, lower thresholds
+        if depth_map is not None and depth_estimator is not None:
+            is_close, _ = depth_estimator.is_obstacle_close(depth_map, detection.bbox)
+            if not is_close:
+                # Object is FAR. Thermal signature will be weak due to pixel averaging.
+                temp_threshold = 35.0  # Lowered from 50.0
+                ratio_threshold = 0.05 # Lowered from 0.20
+
         in_fire = (
-            stats["max_temp"] > FIRE_THRESHOLD_TEMP
-            and stats["hot_pixel_ratio"] > HOT_PIXEL_RATIO_THRESHOLD
+            stats["max_temp"] > temp_threshold
+            and stats["hot_pixel_ratio"] > ratio_threshold
         )
 
         if in_fire:

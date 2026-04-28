@@ -20,8 +20,8 @@ MAX_PACKET_SIZE = 8000                # Max payload per UDP fragment (safe for a
 # =============================================================================
 # Camera Configuration
 # =============================================================================
-RGB_WIDTH = 1280
-RGB_HEIGHT = 720
+RGB_WIDTH = 640
+RGB_HEIGHT = 480
 RGB_FPS = 30
 THERMAL_WIDTH = 32
 THERMAL_HEIGHT = 24
@@ -109,8 +109,8 @@ HOMOGRAPHY_MATRIX = np.eye(3, dtype=np.float64)
 # =============================================================================
 # Visualization
 # =============================================================================
-DISPLAY_WIDTH = 1280
-DISPLAY_HEIGHT = 720
+DISPLAY_WIDTH = 640
+DISPLAY_HEIGHT = 480
 THERMAL_OVERLAY_ALPHA = 0.3           # Transparency for thermal overlay
 FIRE_ZONE_COLOR = (0, 0, 255)         # BGR red — intentionally same as HUMAN_IN_FIRE_COLOR
 HUMAN_IN_FIRE_COLOR = (0, 0, 255)     # BGR red — kept separate so each can be tuned independently

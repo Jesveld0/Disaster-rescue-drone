@@ -241,6 +241,8 @@ class Pipeline:
                     detections,
                     thermal_data["temperatures"],
                     thermal_data["fire_mask"],
+                    depth_map=depth_map,
+                    depth_estimator=self.depth_estimator,
                 )
 
                 # Decision: generate command

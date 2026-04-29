@@ -197,7 +197,7 @@ class Visualizer:
             except cv2.error:
                 pass
 
-        key = cv2.waitKey(1) & 0xFF
+        key = cv2.waitKey(30) & 0xFF
 
         if key == ord('t'):
             self.show_thermal_overlay = not self.show_thermal_overlay

@@ -9,7 +9,7 @@ import logging
 import socket
 from typing import Optional
 
-from config import COMMAND_PORT, COMMAND_NAMES, CMD_STOP, CMD_SAFE
+from config import COMMAND_PORT, COMMAND_NAMES, CMD_STOP, CMD_SAFE, CMD_DROP
 from protocol import encode_command
 
 logger = logging.getLogger(__name__)
@@ -88,6 +88,10 @@ class CommandSender:
     def send_safe(self, frame_id: int = 0):
         """Convenience: send SAFE command."""
         self.send(frame_id, CMD_SAFE)
+
+    def send_drop(self, frame_id: int = 0):
+        """Convenience: send DROP command (always forced — one-shot action)."""
+        self.send(frame_id, CMD_DROP, force=True)
 
     @property
     def last_command(self) -> Optional[int]:

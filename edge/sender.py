@@ -28,7 +28,7 @@ from config import (
     TARGET_FPS, FRAME_INTERVAL, BUFFER_SIZE,
     THERMAL_WIDTH, THERMAL_HEIGHT, COMMAND_NAMES,
     RGB_WIDTH, RGB_HEIGHT,
-    CMD_STOP, CMD_HUMAN_IN_FIRE, CMD_FIRE_ALERT, CMD_SLOW,
+    CMD_STOP, CMD_HUMAN_IN_FIRE, CMD_FIRE_ALERT, CMD_SLOW, CMD_DROP,
 )
 from protocol import (
     FramePacket, encode_frame_packet, current_timestamp_ms,
@@ -37,6 +37,7 @@ from protocol import (
 from edge.rgb_capture import RGBCamera
 from edge.thermal_capture import ThermalCamera
 from edge.ir_sensor import IRSensorArray
+from edge.servo_drop import ServoDrop
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,9 @@ class DroneSender:
         self.ir_sensors = IRSensorArray(simulated=not enable_ir)
         self.enable_ir = enable_ir
 
+        # Payload drop servo
+        self.servo = ServoDrop()
+
         # Networking
         self.send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.obstacle_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -100,6 +104,10 @@ class DroneSender:
         self.ir_sensors.start()
         ir_mode = "HARDWARE" if not self.ir_sensors.is_simulated else "SIMULATED"
         logger.info("IR sensors: %s mode", ir_mode)
+
+        # Start servo
+        self.servo.start()
+        logger.info("Drop servo ready on GPIO %d", 18)
 
         # Bind command listener
         self.cmd_socket.bind(("0.0.0.0", self.command_port))
@@ -240,12 +248,8 @@ class DroneSender:
 
     def _handle_command(self, command_code: int):
         """
-        Process received commands.
-
-        In a real deployment, this would interface with the flight controller
-        via MAVLink or a GPIO signal. Here we log the command.
+        Process received commands from the ground station.
         """
-        cmd_name = COMMAND_NAMES.get(command_code, "UNKNOWN")
         if command_code == CMD_STOP:
             logger.critical("⚠️  STOP COMMAND RECEIVED — Halting drone movement!")
         elif command_code == CMD_HUMAN_IN_FIRE:
@@ -254,8 +258,13 @@ class DroneSender:
             logger.warning("🔥 Fire alert — Proceed with caution")
         elif command_code == CMD_SLOW:
             logger.info("⚡ Slow down command received")
+        elif command_code == CMD_DROP:
+            logger.info("🪂 DROP command received — triggering servo")
+            initiated = self.servo.drop()
+            if not initiated:
+                logger.warning("Drop ignored — servo busy (%s)", self.servo.state)
         else:
-            logger.info("✅ Status: %s", cmd_name)
+            logger.info("✅ Status: %s", COMMAND_NAMES.get(command_code, "UNKNOWN"))
 
     def stop(self):
         """Shut down all resources cleanly."""
@@ -263,6 +272,7 @@ class DroneSender:
         self.rgb_camera.close()
         self.thermal_camera.close()
         self.ir_sensors.stop()
+        self.servo.stop()
         self.send_socket.close()
         self.obstacle_socket.close()
         self.cmd_socket.close()

@@ -58,6 +58,7 @@ CMD_SLOW = 1
 CMD_STOP = 2
 CMD_FIRE_ALERT = 3
 CMD_HUMAN_IN_FIRE = 4
+CMD_DROP = 5          # Trigger payload drop mechanism
 
 COMMAND_NAMES = {
     CMD_SAFE: "SAFE",
@@ -65,10 +66,22 @@ COMMAND_NAMES = {
     CMD_STOP: "STOP",
     CMD_FIRE_ALERT: "FIRE_ALERT",
     CMD_HUMAN_IN_FIRE: "HUMAN_IN_FIRE",
+    CMD_DROP: "DROP",
 }
 
 # Command priority (higher index = higher priority)
 COMMAND_PRIORITY = [CMD_SAFE, CMD_SLOW, CMD_STOP, CMD_FIRE_ALERT, CMD_HUMAN_IN_FIRE]
+# Note: CMD_DROP is not in the priority chain — it is sent independently
+
+# =============================================================================
+# Servo / Drop Mechanism (Raspberry Pi GPIO)
+# =============================================================================
+SERVO_GPIO_PIN = 18          # BCM pin — hardware PWM on Pi 4 (GPIO 18 = PWM0)
+SERVO_FREQ_HZ = 50           # Standard servo PWM frequency
+SERVO_CLOSED_DUTY = 7.5     # Duty cycle for closed/locked position (90° neutral)
+SERVO_OPEN_DUTY = 12.5      # Duty cycle for open/drop position (~180°)
+SERVO_HOLD_SEC = 1.5        # Seconds to hold open before returning to closed
+SERVO_RETURN_DELAY = 0.5    # Seconds to wait after returning closed before ready again
 
 # =============================================================================
 # Performance Targets

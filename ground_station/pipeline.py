@@ -397,6 +397,13 @@ class Pipeline:
                     logger.info("Quit requested by user")
                     self._running = False
 
+                # Manual drop — Space key consumed from visualizer
+                if self.visualizer.take_drop_pending():
+                    logger.warning("🪂 Manual DROP triggered by operator (Space key)")
+                    self.command_sender.send_drop(frame_id=result.frame_id)
+                    self.visualizer.trigger_drop_flash()
+
+
         except KeyboardInterrupt:
             logger.info("Display interrupted")
         finally:

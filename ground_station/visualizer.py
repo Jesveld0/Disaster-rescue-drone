@@ -68,6 +68,10 @@ class Visualizer:
         self.show_grid_overlay = False
         self._last_thermal = None
 
+        # Drop mechanism state
+        self._drop_flash_until: float = 0.0   # monotonic time until flash expires
+        self._drop_pending: bool = False       # set True by Space key, consumed by pipeline
+
         # FPS tracking
         self._frame_times: list[float] = []
         self._fps = 0.0
@@ -161,6 +165,9 @@ class Visualizer:
             fusion_result, tracking_result, ir_obstacles,
         )
 
+        # Drop flash overlay (shown after Space press)
+        self._draw_drop_flash(display)
+
         # Update FPS
         self._update_fps()
 
@@ -204,8 +211,42 @@ class Visualizer:
         elif key == ord('p'):
             self.show_grid_overlay = not self.show_grid_overlay
             logger.info("Grid overlay: %s", "ON" if self.show_grid_overlay else "OFF")
+        elif key == ord(' '):
+            self._drop_pending = True
+            logger.info("Drop command triggered via UI")
 
         return key
+
+    def trigger_drop_flash(self, hold_sec: float = 1.5):
+        """Called by pipeline after a drop command is sent; shows a HUD flash."""
+        import time as _t
+        self._drop_flash_until = _t.monotonic() + hold_sec
+
+    def take_drop_pending(self) -> bool:
+        """
+        Consume and return the drop_pending flag.
+        Returns True once (on the frame Space was pressed), then resets to False.
+        """
+        pending = self._drop_pending
+        self._drop_pending = False
+        return pending
+
+    def _draw_drop_flash(self, frame: np.ndarray):
+        """Draw a prominent DROP RELEASED overlay for SERVO_HOLD_SEC after a drop."""
+        import time as _t
+        if _t.monotonic() > self._drop_flash_until:
+            return
+        h, w = frame.shape[:2]
+        # Semi-transparent red/orange banner across top
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (w, 70), (0, 80, 220), -1)
+        alpha = 0.55
+        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+        cv2.putText(
+            frame, "\U0001FA82 PAYLOAD DROPPED",
+            (w // 2 - 200, 50),
+            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3, cv2.LINE_AA,
+        )
 
     def _draw_tracked_persons(
         self,
@@ -424,6 +465,7 @@ class Visualizer:
             2: (0, 0, 255),     # STOP = red
             3: (0, 100, 255),   # FIRE_ALERT = orange
             4: (0, 0, 255),     # HUMAN_IN_FIRE = red
+            5: (0, 200, 255),   # DROP = cyan
         }
         cmd_color = cmd_colors.get(command_code, (200, 200, 200))
 
@@ -433,6 +475,12 @@ class Visualizer:
         cv2.putText(
             frame, f"CMD: {cmd_name}", (10, bar_y + 28),
             font, 0.6, cmd_color, 2, cv2.LINE_AA,
+        )
+
+        # Drop shortcut hint
+        cv2.putText(
+            frame, "[SPACE]=DROP", (10, bar_y - 6),
+            font, 0.38, (120, 120, 120), 1, cv2.LINE_AA,
         )
 
         # FPS

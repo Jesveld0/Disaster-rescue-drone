@@ -6,6 +6,7 @@ from typing import List, Optional, Tuple, Union
 import cv2
 import numpy as np
 from ultralytics import RTDETR, YOLO
+from logger_utils import log_to_csv
 
 
 @dataclass
@@ -227,8 +228,20 @@ class HumanSegmenter:
 
             # 6) FPS counter
             cur_t = time.time()
+            inf_time = (cur_t - prev_t) * 1000.0 # Approximation of total processing time
             fps = 1.0 / max(cur_t - prev_t, 1e-6)
             prev_t = cur_t
+            
+            # Log metrics
+            log_data = {
+                "epoch": -1,
+                "model_name": "RT-DETR",
+                "mAP50": 0, "mAP50_95": 0, "precision": 0, "recall": 0, "f1_score": 0, "loss": 0,
+                "inference_time_ms": inf_time,
+                "fps": fps
+            }
+            log_to_csv("rtdetr_results.csv", log_data)
+
             cv2.putText(
                 vis,
                 f"FPS: {fps:.1f}",

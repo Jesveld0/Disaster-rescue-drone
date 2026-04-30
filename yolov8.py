@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 
 import torch
 from ultralytics import YOLO
+from logger_utils import log_to_csv
 
 
 @dataclass
@@ -80,6 +81,31 @@ class YoloDetectorTrainer:
         """Train YOLOv8 medium model with high-throughput settings."""
         self.validate_paths()
         # Increase imgsz to 1280 for higher precision if VRAM/headroom allows.
+        # Add callback for per-epoch logging
+        def on_train_epoch_end(trainer):
+            metrics = trainer.metrics
+            log_data = {
+                "epoch": trainer.epoch + 1,
+                "model_name": "YOLOv8",
+                "mAP50": metrics.get("metrics/mAP50(B)", 0),
+                "mAP50_95": metrics.get("metrics/mAP50-95(B)", 0),
+                "precision": metrics.get("metrics/precision(B)", 0),
+                "recall": metrics.get("metrics/recall(B)", 0),
+                "f1_score": 0,  # Calculated below
+                "loss": getattr(trainer, "loss", 0),
+                "inference_time_ms": metrics.get("metrics/precision(B)", 0), # placeholder
+                "fps": 0
+            }
+            # Calculate F1
+            p = log_data["precision"]
+            r = log_data["recall"]
+            if (p + r) > 0:
+                log_data["f1_score"] = 2 * (p * r) / (p + r)
+            
+            log_to_csv("yolov8_results.csv", log_data)
+
+        self.model.add_callback("on_train_epoch_end", on_train_epoch_end)
+
         return self.model.train(
             data=str(self.config.data_yaml),
             epochs=self.config.epochs,
@@ -132,6 +158,18 @@ class YoloDetectorTrainer:
         )
         for results in stream:
             persons = filter_person_detections([results])
+            
+            # Log inference metrics
+            inf_time = results.speed.get('inference', 0)
+            log_data = {
+                "epoch": -1, # Inference mode
+                "model_name": "YOLOv8",
+                "mAP50": 0, "mAP50_95": 0, "precision": 0, "recall": 0, "f1_score": 0, "loss": 0,
+                "inference_time_ms": inf_time,
+                "fps": 1000.0 / inf_time if inf_time > 0 else 0
+            }
+            log_to_csv("yolov8_results.csv", log_data)
+
             if persons:
                 print(f"Persons detected: {persons}")
 

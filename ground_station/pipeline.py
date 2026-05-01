@@ -47,6 +47,7 @@ from ground_station.fusion import ThermalFusion, FusionResult
 from ground_station.decision import DecisionEngine
 from ground_station.command_sender import CommandSender
 from ground_station.visualizer import Visualizer
+from ground_station.pathfinder import Pathfinder, PathfindingResult
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,7 @@ class InferenceResult:
     thermal_data: dict           # From ThermalProcessor.process()
     depth_map: Optional[np.ndarray] = None
     depth_colormap: Optional[np.ndarray] = None
+    path_result: Optional[PathfindingResult] = None
 
 
 class Pipeline:
@@ -131,6 +133,7 @@ class Pipeline:
         self.fusion = ThermalFusion(self.thermal_processor)
         self.decision = DecisionEngine(self.depth_estimator)
         self.command_sender = CommandSender(command_port=command_port)
+        self.pathfinder = Pathfinder()
         self.visualizer = Visualizer() if enable_display else None
 
         # Control
@@ -284,6 +287,14 @@ class Pipeline:
                     self.command_sender.set_drone_address(self.receiver.sender_address)
                 self.command_sender.send(decoded.frame_id, command_code)
 
+                # Pathfinding: compute safe navigation path
+                path_result = self.pathfinder.update(
+                    detections=detections,
+                    fusion_result=fusion_result,
+                    depth_map=depth_map,
+                    frame_shape=decoded.rgb_bgr.shape,
+                )
+
                 # Cache result for display thread
                 result = InferenceResult(
                     frame=decoded,
@@ -293,6 +304,7 @@ class Pipeline:
                     thermal_data=thermal_data,
                     depth_map=depth_map,
                     depth_colormap=depth_colormap,
+                    path_result=path_result,
                 )
                 with self._inference_lock:
                     self._cached_inference = result
@@ -357,6 +369,7 @@ class Pipeline:
                         thermal_colormap=cached.thermal_data.get("colormap"),
                         fire_mask=cached.thermal_data.get("fire_mask"),
                         depth_colormap=cached.depth_colormap,
+                        path_result=cached.path_result,
                     )
                 else:
                     # No inference yet — show raw frame with init message

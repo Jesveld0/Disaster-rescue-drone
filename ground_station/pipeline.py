@@ -275,8 +275,12 @@ class Pipeline:
                     if depth_map is not None:
                         depth_colormap = self.depth_estimator.get_depth_colormap(depth_map)
 
-                # Get latest IR obstacle data
-                ir_obstacles = self.obstacle_receiver.get_latest()
+                # Get latest IR obstacle data (discard if stale)
+                ir_obstacles = (
+                    self.obstacle_receiver.get_latest()
+                    if self.obstacle_receiver.has_recent_data
+                    else None
+                )
 
                 # Pathfinding
                 path = []

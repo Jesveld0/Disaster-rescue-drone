@@ -29,6 +29,7 @@ from config import (
     THERMAL_WIDTH, THERMAL_HEIGHT, COMMAND_NAMES,
     RGB_WIDTH, RGB_HEIGHT,
     CMD_STOP, CMD_HUMAN_IN_FIRE, CMD_FIRE_ALERT, CMD_SLOW, CMD_DROP,
+    SERVO_GPIO_PIN,
 )
 from protocol import (
     FramePacket, encode_frame_packet, current_timestamp_ms,
@@ -107,7 +108,7 @@ class DroneSender:
 
         # Start servo
         self.servo.start()
-        logger.info("Drop servo ready on GPIO %d", 18)
+        logger.info("Drop servo ready on GPIO %d", SERVO_GPIO_PIN)
 
         # Bind command listener
         self.cmd_socket.bind(("0.0.0.0", self.command_port))

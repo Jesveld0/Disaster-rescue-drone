@@ -38,33 +38,66 @@ class RGBCamera:
         """
         Open the camera device and configure resolution/FPS.
 
+        Tries multiple backends (V4L2 first, then default) and device
+        indices to handle different Pi camera configurations.
+
         Returns:
             True if camera opened successfully.
         """
-        self.cap = cv2.VideoCapture(self.device_index)
-        if not self.cap.isOpened():
-            logger.error("Failed to open camera at device index %d", self.device_index)
-            return False
+        # Try V4L2 backend first (most reliable on Raspberry Pi),
+        # then default backend as fallback.
+        backends = [
+            (cv2.CAP_V4L2, "V4L2"),
+            (cv2.CAP_ANY, "default"),
+        ]
+        # Try requested device index first, then probe 0-4
+        indices = [self.device_index] + [
+            i for i in range(5) if i != self.device_index
+        ]
 
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, RGB_WIDTH)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RGB_HEIGHT)
-        self.cap.set(cv2.CAP_PROP_FPS, RGB_FPS)
+        for idx in indices:
+            for backend_id, backend_name in backends:
+                logger.info(
+                    "Trying camera device=%d backend=%s", idx, backend_name
+                )
+                cap = cv2.VideoCapture(idx, backend_id)
+                if cap.isOpened():
+                    # Try reading one test frame to confirm it's real
+                    ret, test_frame = cap.read()
+                    if ret and test_frame is not None:
+                        self.cap = cap
+                        self.device_index = idx
+                        logger.info(
+                            "Camera opened: device=%d, backend=%s",
+                            idx, backend_name,
+                        )
+                        # Configure resolution/FPS
+                        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, RGB_WIDTH)
+                        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RGB_HEIGHT)
+                        self.cap.set(cv2.CAP_PROP_FPS, RGB_FPS)
 
-        # Verify actual resolution
-        actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        logger.info(
-            "Camera opened: device=%d, resolution=%dx%d",
-            self.device_index, actual_w, actual_h,
+                        actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                        actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        logger.info(
+                            "Camera resolution: %dx%d", actual_w, actual_h
+                        )
+                        if actual_w != RGB_WIDTH or actual_h != RGB_HEIGHT:
+                            logger.warning(
+                                "Resolution mismatch: requested %dx%d, got %dx%d. "
+                                "Frames will be resized.",
+                                RGB_WIDTH, RGB_HEIGHT, actual_w, actual_h,
+                            )
+                        return True
+                    else:
+                        cap.release()
+                else:
+                    cap.release()
+
+        logger.error(
+            "Failed to open camera on any device/backend. "
+            "Check cable connection and run: ls /dev/video*"
         )
-
-        if actual_w != RGB_WIDTH or actual_h != RGB_HEIGHT:
-            logger.warning(
-                "Camera resolution mismatch: requested %dx%d, got %dx%d. "
-                "Frames will be resized.",
-                RGB_WIDTH, RGB_HEIGHT, actual_w, actual_h,
-            )
-        return True
+        return False
 
     def read(self) -> tuple[bytes | None, np.ndarray | None]:
         """

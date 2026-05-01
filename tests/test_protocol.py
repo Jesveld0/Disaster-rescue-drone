@@ -34,7 +34,7 @@ class TestFramePacket:
         """Create a sample FramePacket for testing."""
         # Create a minimal valid JPEG (SOI + EOI markers)
         jpeg_data = bytes([0xFF, 0xD8, 0xFF, 0xE0]) + b"\x00" * 100 + bytes([0xFF, 0xD9])
-        thermal = np.random.randint(0, 255, (THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.uint8)
+        thermal = np.random.randint(0, 255, (THERMAL_HEIGHT, THERMAL_WIDTH, 3), dtype=np.uint8)
 
         return FramePacket(
             frame_id=42,
@@ -44,7 +44,7 @@ class TestFramePacket:
             thermal_width=THERMAL_WIDTH,
             thermal_height=THERMAL_HEIGHT,
             rgb_jpeg=jpeg_data,
-            thermal_gray=thermal,
+            thermal_heatmap=thermal,
         )
 
     def test_encode_decode_roundtrip(self):
@@ -60,7 +60,7 @@ class TestFramePacket:
         assert decoded.thermal_width == original.thermal_width
         assert decoded.thermal_height == original.thermal_height
         assert decoded.rgb_jpeg == original.rgb_jpeg
-        np.testing.assert_array_equal(decoded.thermal_gray, original.thermal_gray)
+        np.testing.assert_array_equal(decoded.thermal_heatmap, original.thermal_heatmap)
 
     def test_invalid_magic_number(self):
         """Packets with wrong magic number should be rejected."""
@@ -89,7 +89,7 @@ class TestFramePacket:
 
     def test_invalid_jpeg(self):
         """Packets with invalid JPEG data should be rejected."""
-        thermal = np.zeros((THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.uint8)
+        thermal = np.zeros((THERMAL_HEIGHT, THERMAL_WIDTH, 3), dtype=np.uint8)
 
         # Header + metadata with non-JPEG data
         header = struct.pack("!IIQ", MAGIC_NUMBER, 1, current_timestamp_ms())

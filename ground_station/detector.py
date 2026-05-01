@@ -70,11 +70,12 @@ class YOLODetector:
         "suitcase", "backpack",
     }
 
-    def __init__(self, model_path: str = YOLO_MODEL_PATH, device: str = None):
+    def __init__(self, model_path: str = YOLO_MODEL_PATH, device: str = None, imgsz: int = None):
         """
         Args:
             model_path: Path to YOLOv8 model weights (.pt file).
             device: Compute device ('cuda', 'cpu', or None for auto).
+            imgsz: Inference input size. None = auto (320 on CPU, 640 on CUDA).
         """
         self.model_path = model_path
         self.model = None
@@ -86,6 +87,12 @@ class YOLODetector:
         else:
             self.device = device
 
+        # Auto-select inference resolution: 320 on CPU (fast), 640 on CUDA (accurate)
+        if imgsz is not None:
+            self.imgsz = imgsz
+        else:
+            self.imgsz = 640 if self.device == "cuda" else 320
+
         self._load_model()
 
     def _load_model(self):
@@ -95,12 +102,15 @@ class YOLODetector:
             return
 
         try:
-            logger.info("Loading YOLOv8 model: %s on %s", self.model_path, self.device)
+            logger.info(
+                "Loading YOLOv8 model: %s on %s (imgsz=%d)",
+                self.model_path, self.device, self.imgsz,
+            )
             self.model = YOLO(self.model_path)
 
             # Warm up the model with a dummy inference
-            dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-            self.model.predict(dummy, device=self.device, verbose=False)
+            dummy = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
+            self.model.predict(dummy, device=self.device, imgsz=self.imgsz, verbose=False)
 
             # Cache class names
             self._class_names = self.model.names
@@ -137,6 +147,7 @@ class YOLODetector:
                 conf=YOLO_CONFIDENCE,
                 iou=YOLO_IOU_THRESHOLD,
                 device=self.device,
+                imgsz=self.imgsz,
                 verbose=False,
                 half=self.device == "cuda",  # FP16 on GPU
             )

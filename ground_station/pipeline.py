@@ -6,6 +6,10 @@ Orchestrates all modules into a 3-thread pipeline:
     Thread 2 (Inference): queue → YOLO + thermal + depth → fusion → decision
     Thread 3 (Display):   render annotated frame → show + JSON output
 
+Display is DECOUPLED from inference: raw video streams at camera FPS
+and the last-known bounding boxes / annotations are overlaid. This keeps
+the video smooth even when inference is slow (CPU mode).
+
 Usage:
     python -m ground_station.pipeline
     python -m ground_station.pipeline --port 5000 --no-depth
@@ -23,6 +27,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
+import torch
 
 # Add parent directory for imports
 sys.path.insert(0, ".")
@@ -42,6 +47,7 @@ from ground_station.fusion import ThermalFusion, FusionResult
 from ground_station.decision import DecisionEngine
 from ground_station.command_sender import CommandSender
 from ground_station.visualizer import Visualizer
+from ground_station.pathfinder import Pathfinder, PathfindingResult
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +58,7 @@ class DecodedFrame:
     frame_id: int
     timestamp_ms: int
     rgb_bgr: np.ndarray         # BGR image (720, 1280, 3)
-    thermal_gray: np.ndarray    # Grayscale thermal (24, 32)
+    thermal_heatmap: np.ndarray # Heatmap BGR thermal (24, 32, 3)
 
 
 @dataclass
@@ -65,6 +71,7 @@ class InferenceResult:
     thermal_data: dict           # From ThermalProcessor.process()
     depth_map: Optional[np.ndarray] = None
     depth_colormap: Optional[np.ndarray] = None
+    path_result: Optional[PathfindingResult] = None
 
 
 class Pipeline:
@@ -72,10 +79,12 @@ class Pipeline:
     Real-time ground station pipeline with 3 processing threads.
 
     Architecture:
-        [UDP Receiver] → decode_queue → [Inference Thread] → display_queue → [Display Thread]
+        [UDP Receiver] → decode_queue → [Inference Thread] → (cached result)
+                       ↘ raw_display_queue → [Display Thread] ← uses cached inference
 
-    All threads are coordinated via thread-safe queues with size limits
-    to prevent memory buildup when inference is slower than receive.
+    Display is decoupled from inference: the display thread shows raw
+    frames at camera FPS with the last-known inference annotations overlaid.
+    This keeps video smooth even when YOLO runs at 3-5 FPS on CPU.
     """
 
     def __init__(
@@ -92,12 +101,25 @@ class Pipeline:
             enable_depth: Enable MiDaS depth estimation (requires GPU memory).
             enable_display: Enable OpenCV display window.
         """
-        self.enable_depth = enable_depth
         self.enable_display = enable_display
+
+        # Auto-disable depth on CPU (too slow: ~500ms per frame)
+        has_cuda = torch.cuda.is_available()
+        if enable_depth and not has_cuda:
+            logger.warning(
+                "⚡ No CUDA GPU detected — disabling MiDaS depth estimation "
+                "(saves ~500ms per frame). Use --no-depth to suppress this warning."
+            )
+            enable_depth = False
+        self.enable_depth = enable_depth
 
         # Queues between stages (small to keep latency low)
         self._decode_queue: queue.Queue[DecodedFrame] = queue.Queue(maxsize=3)
-        self._display_queue: queue.Queue[InferenceResult] = queue.Queue(maxsize=2)
+        self._raw_display_queue: queue.Queue[DecodedFrame] = queue.Queue(maxsize=2)
+
+        # Cached inference result (shared between inference and display threads)
+        self._cached_inference: Optional[InferenceResult] = None
+        self._inference_lock = threading.Lock()
 
         # Modules
         self.receiver = FrameReceiver(
@@ -111,6 +133,7 @@ class Pipeline:
         self.fusion = ThermalFusion(self.thermal_processor)
         self.decision = DecisionEngine(self.depth_estimator)
         self.command_sender = CommandSender(command_port=command_port)
+        self.pathfinder = Pathfinder()
         self.visualizer = Visualizer() if enable_display else None
 
         # Control
@@ -125,9 +148,10 @@ class Pipeline:
         logger.info("Data port: %d | Command port: %d", DATA_PORT, COMMAND_PORT)
         logger.info("Depth estimation: %s", "ENABLED" if self.enable_depth else "DISABLED")
         logger.info("Display: %s", "ENABLED" if self.enable_display else "DISABLED")
-        logger.info("YOLO loaded: %s | Device: %s",
+        logger.info("YOLO loaded: %s | Device: %s | imgsz: %d",
                      self.detector.is_loaded,
-                     self.detector.device if self.detector.is_loaded else "N/A")
+                     self.detector.device if self.detector.is_loaded else "N/A",
+                     self.detector.imgsz if self.detector.is_loaded else 0)
         if self.depth_estimator:
             logger.info("MiDaS loaded: %s", self.depth_estimator.is_loaded)
         logger.info("=" * 60)
@@ -161,7 +185,7 @@ class Pipeline:
         Stage 1: Receive and decode frames.
 
         Pulls frames from the UDP receiver, decodes JPEG + thermal,
-        and pushes to the inference queue.
+        and pushes to BOTH the inference queue and the raw display queue.
         """
         logger.info("Receive stage started")
 
@@ -174,27 +198,36 @@ class Pipeline:
                     continue
 
                 # Decode
-                rgb_bgr, thermal_gray = self.decoder.decode(packet)
-                if rgb_bgr is None or thermal_gray is None:
+                rgb_bgr, thermal_heatmap = self.decoder.decode(packet)
+                if rgb_bgr is None or thermal_heatmap is None:
                     continue
 
                 decoded = DecodedFrame(
                     frame_id=packet.frame_id,
                     timestamp_ms=packet.timestamp_ms,
                     rgb_bgr=rgb_bgr,
-                    thermal_gray=thermal_gray,
+                    thermal_heatmap=thermal_heatmap,
                 )
 
-                # Non-blocking put — drop if queue full
+                # Push to inference queue (non-blocking — drop if full)
                 try:
                     self._decode_queue.put_nowait(decoded)
                 except queue.Full:
-                    # Drop oldest and insert new
                     try:
                         self._decode_queue.get_nowait()
                     except queue.Empty:
                         pass
                     self._decode_queue.put_nowait(decoded)
+
+                # Also push to raw display queue for smooth video
+                try:
+                    self._raw_display_queue.put_nowait(decoded)
+                except queue.Full:
+                    try:
+                        self._raw_display_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    self._raw_display_queue.put_nowait(decoded)
 
             except Exception as e:
                 logger.error("Receive stage error: %s", e, exc_info=True)
@@ -206,7 +239,8 @@ class Pipeline:
         Stage 2: Run AI inference on decoded frames.
 
         Performs YOLO detection, thermal processing, depth estimation,
-        fusion analysis, and decision-making.
+        fusion analysis, and decision-making. Results are cached for
+        the display thread to pick up.
         """
         logger.info("Inference stage started")
 
@@ -223,7 +257,7 @@ class Pipeline:
                     continue
 
                 # Thermal processing
-                thermal_data = self.thermal_processor.process(decoded.thermal_gray)
+                thermal_data = self.thermal_processor.process(decoded.thermal_heatmap)
 
                 # YOLO detection
                 detections = self.detector.detect(decoded.rgb_bgr)
@@ -253,7 +287,15 @@ class Pipeline:
                     self.command_sender.set_drone_address(self.receiver.sender_address)
                 self.command_sender.send(decoded.frame_id, command_code)
 
-                # Package result for display
+                # Pathfinding: compute safe navigation path
+                path_result = self.pathfinder.update(
+                    detections=detections,
+                    fusion_result=fusion_result,
+                    depth_map=depth_map,
+                    frame_shape=decoded.rgb_bgr.shape,
+                )
+
+                # Cache result for display thread
                 result = InferenceResult(
                     frame=decoded,
                     detections=detections,
@@ -262,17 +304,10 @@ class Pipeline:
                     thermal_data=thermal_data,
                     depth_map=depth_map,
                     depth_colormap=depth_colormap,
+                    path_result=path_result,
                 )
-
-                # Push to display queue
-                try:
-                    self._display_queue.put_nowait(result)
-                except queue.Full:
-                    try:
-                        self._display_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                    self._display_queue.put_nowait(result)
+                with self._inference_lock:
+                    self._cached_inference = result
 
             except Exception as e:
                 logger.error("Inference stage error: %s", e, exc_info=True)
@@ -281,35 +316,69 @@ class Pipeline:
 
     def _display_stage(self):
         """
-        Stage 3: Render and display annotated frames.
+        Stage 3: Render and display frames at camera FPS.
+
+        DECOUPLED from inference: always shows the latest raw frame with
+        the most recent inference annotations overlaid. This means:
+        - Video streams at camera FPS (~20 FPS) regardless of inference speed
+        - Bounding boxes update whenever inference completes (~3-10 FPS on CPU)
 
         MUST run on the main thread (OpenCV GUI requirement on macOS/Linux).
         """
         logger.info("Display stage started (main thread)")
 
+        last_frame_time = 0.0
+        last_raw_frame = None
+
         try:
             while self._running:
+                # Get latest raw frame (short timeout for responsive UI)
                 try:
-                    result = self._display_queue.get(timeout=0.05)
+                    raw = self._raw_display_queue.get(timeout=0.03)
+                    last_frame_time = time.time()
+                    last_raw_frame = raw
                 except queue.Empty:
-                    # Show a "waiting" frame if no data
-                    self._show_waiting_frame()
-                    key = cv2.waitKey(1) & 0xFF
-                    if key == ord('q'):
-                        self._running = False
-                    continue
+                    if time.time() - last_frame_time > 1.0:
+                        # No new frame for > 1s — show waiting frame
+                        self._show_waiting_frame()
+                        key = cv2.waitKey(1) & 0xFF
+                        if key == ord('q'):
+                            self._running = False
+                        continue
+                    elif last_raw_frame is not None:
+                        # Re-render the last available raw frame
+                        raw = last_raw_frame
+                    else:
+                        key = cv2.waitKey(1) & 0xFF
+                        if key == ord('q'):
+                            self._running = False
+                        continue
 
-                # Render annotated frame
-                display = self.visualizer.render(
-                    rgb_frame=result.frame.rgb_bgr,
-                    fusion_result=result.fusion_result,
-                    detections=result.detections,
-                    command_code=result.command_code,
-                    frame_id=result.frame.frame_id,
-                    thermal_colormap=result.thermal_data.get("colormap"),
-                    fire_mask=result.thermal_data.get("fire_mask"),
-                    depth_colormap=result.depth_colormap,
-                )
+                # Get cached inference results (if any)
+                with self._inference_lock:
+                    cached = self._cached_inference
+
+                if cached is not None:
+                    # Render raw frame with last-known annotations
+                    display = self.visualizer.render(
+                        rgb_frame=raw.rgb_bgr,
+                        fusion_result=cached.fusion_result,
+                        detections=cached.detections,
+                        command_code=cached.command_code,
+                        frame_id=raw.frame_id,
+                        thermal_colormap=cached.thermal_data.get("colormap"),
+                        fire_mask=cached.thermal_data.get("fire_mask"),
+                        depth_colormap=cached.depth_colormap,
+                        path_result=cached.path_result,
+                    )
+                else:
+                    # No inference yet — show raw frame with init message
+                    display = raw.rgb_bgr.copy()
+                    cv2.putText(
+                        display, "Initializing AI models...",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                        (0, 200, 255), 2, cv2.LINE_AA,
+                    )
 
                 # Show and handle keyboard
                 key = self.visualizer.show(display)
@@ -323,12 +392,14 @@ class Pipeline:
             self.stop()
 
     def _headless_stage(self):
-        """Headless mode: consume results and log, no display."""
+        """Headless mode: consume inference results and log, no display."""
         logger.info("Running in headless mode (no display)")
         try:
             while self._running:
-                try:
-                    result = self._display_queue.get(timeout=0.1)
+                with self._inference_lock:
+                    result = self._cached_inference
+
+                if result is not None:
                     cmd_name = COMMAND_NAMES.get(result.command_code, "UNKNOWN")
                     logger.info(
                         "Frame %d | CMD: %s | Persons: %d | Fire: %d | Obstacles: %d | "
@@ -340,8 +411,7 @@ class Pipeline:
                         len(result.detections.obstacles),
                         result.detections.inference_time_ms,
                     )
-                except queue.Empty:
-                    continue
+                time.sleep(0.1)
         except KeyboardInterrupt:
             logger.info("Headless mode interrupted")
         finally:
@@ -411,7 +481,7 @@ def main():
     )
     parser.add_argument(
         "--headless", action="store_true",
-        help="Run without display window (logging only)",
+        help="Run without GUI windows (logging only)",
     )
     parser.add_argument(
         "--log-level", default="INFO",
@@ -434,7 +504,7 @@ def main():
 
     def signal_handler(sig, frame):
         logger.info("Signal %d received — shutting down...", sig)
-        pipeline.stop()
+        pipeline.stop()  
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)

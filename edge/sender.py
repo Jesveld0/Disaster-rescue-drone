@@ -116,7 +116,7 @@ class DroneSender:
                     continue
 
                 # Capture thermal
-                _, thermal_gray = self.thermal_camera.read()
+                _, thermal_heatmap = self.thermal_camera.read()
 
                 # Build frame packet
                 packet = FramePacket(
@@ -127,7 +127,7 @@ class DroneSender:
                     thermal_width=THERMAL_WIDTH,
                     thermal_height=THERMAL_HEIGHT,
                     rgb_jpeg=jpeg_bytes,
-                    thermal_gray=thermal_gray,
+                    thermal_heatmap=thermal_heatmap,
                 )
 
                 # Encode and send

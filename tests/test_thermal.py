@@ -2,15 +2,17 @@
 test_thermal.py — Unit tests for thermal processing.
 
 Tests:
-- Grayscale conversion formula
-- Temperature recovery from grayscale
+- Heatmap-to-intensity recovery (JET colormap inversion)
+- Intensity-to-temperature conversion
 - Upscaling dimensions
 - Fire mask thresholding
 - Region temperature extraction
+- Full processing pipeline with heatmap input
 """
 
 import sys
 
+import cv2
 import numpy as np
 import pytest
 
@@ -20,61 +22,59 @@ from config import (
     THERMAL_WIDTH, THERMAL_HEIGHT, THERMAL_MIN_TEMP, THERMAL_RANGE,
     FIRE_THRESHOLD_TEMP, FIRE_THRESHOLD_GRAY, RGB_WIDTH, RGB_HEIGHT,
 )
-from edge.thermal_capture import ThermalCamera
 from ground_station.thermal_processing import ThermalProcessor
 
 
-class TestThermalConversion:
-    """Tests for temperature ↔ grayscale conversion."""
+class TestIntensityConversion:
+    """Tests for heatmap ↔ intensity ↔ temperature conversion."""
 
-    def test_min_temp_maps_to_zero(self):
-        """20°C should map to grayscale 0."""
-        temps = np.array([[THERMAL_MIN_TEMP]], dtype=np.float32)
-        gray = ThermalCamera.temps_to_grayscale(temps)
-        assert gray[0, 0] == 0
+    def setup_method(self):
+        self.processor = ThermalProcessor()
 
-    def test_max_temp_maps_to_255(self):
-        """150°C should map to grayscale 255."""
-        temps = np.array([[150.0]], dtype=np.float32)
-        gray = ThermalCamera.temps_to_grayscale(temps)
-        assert gray[0, 0] == 255
+    def test_intensity_to_temp_min(self):
+        """Intensity 0 should map to minimum temperature (20°C)."""
+        intensity = np.array([[0]], dtype=np.uint8)
+        temps = ThermalProcessor.intensity_to_temps(intensity)
+        assert abs(temps[0, 0] - THERMAL_MIN_TEMP) < 0.1
 
-    def test_fire_threshold_gray_value(self):
-        """50°C should map to the expected grayscale value."""
-        temps = np.array([[FIRE_THRESHOLD_TEMP]], dtype=np.float32)
-        gray = ThermalCamera.temps_to_grayscale(temps)
-        expected = int(np.clip((50.0 - 20.0) / 130.0 * 255, 0, 255))
-        assert gray[0, 0] == expected
-        assert gray[0, 0] == FIRE_THRESHOLD_GRAY
+    def test_intensity_to_temp_max(self):
+        """Intensity 255 should map to maximum temperature (150°C)."""
+        intensity = np.array([[255]], dtype=np.uint8)
+        temps = ThermalProcessor.intensity_to_temps(intensity)
+        expected = THERMAL_MIN_TEMP + THERMAL_RANGE  # 150.0
+        assert abs(temps[0, 0] - expected) < 0.6
 
-    def test_below_min_clamps_to_zero(self):
-        """Temperatures below 20°C should clamp to 0."""
-        temps = np.array([[-10.0, 0.0, 10.0]], dtype=np.float32)
-        gray = ThermalCamera.temps_to_grayscale(temps)
-        assert np.all(gray == 0)
-
-    def test_above_max_clamps_to_255(self):
-        """Temperatures above 150°C should clamp to 255."""
-        temps = np.array([[200.0, 300.0]], dtype=np.float32)
-        gray = ThermalCamera.temps_to_grayscale(temps)
-        assert np.all(gray == 255)
-
-    def test_roundtrip_conversion(self):
-        """temp → gray → temp should approximately preserve values."""
-        original_temps = np.array([25.0, 50.0, 80.0, 120.0], dtype=np.float32)
-        gray = ThermalCamera.temps_to_grayscale(original_temps.reshape(1, -1))
-        recovered = ThermalCamera.grayscale_to_temps(gray)
-
+    def test_intensity_to_temp_fire_threshold(self):
+        """FIRE_THRESHOLD_GRAY should map to approximately 50°C."""
+        intensity = np.array([[FIRE_THRESHOLD_GRAY]], dtype=np.uint8)
+        temps = ThermalProcessor.intensity_to_temps(intensity)
         # uint8 quantization introduces ≤0.51°C error (130/255)
-        np.testing.assert_allclose(
-            recovered.flatten(), original_temps, atol=0.6
-        )
+        assert abs(temps[0, 0] - FIRE_THRESHOLD_TEMP) < 1.0
 
-    def test_full_range_monotonic(self):
-        """Grayscale values should be monotonically increasing with temperature."""
-        temps = np.linspace(20.0, 150.0, 100).reshape(1, -1).astype(np.float32)
-        gray = ThermalCamera.temps_to_grayscale(temps)
-        assert np.all(np.diff(gray.flatten()) >= 0)
+    def test_intensity_monotonic(self):
+        """Temperature should increase monotonically with intensity."""
+        intensity = np.arange(0, 256, dtype=np.uint8).reshape(1, -1)
+        temps = ThermalProcessor.intensity_to_temps(intensity)
+        assert np.all(np.diff(temps.flatten()) >= 0)
+
+    def test_heatmap_to_intensity_roundtrip(self):
+        """Creating a JET heatmap and recovering intensity should be close."""
+        # Create a known intensity image at thermal sensor dimensions
+        original = np.random.randint(0, 256, (THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.uint8)
+        # Apply JET colormap (simulate what the edge device does)
+        heatmap = cv2.applyColorMap(original, cv2.COLORMAP_JET)
+        # Recover intensity
+        recovered = self.processor.heatmap_to_intensity(heatmap)
+        # Allow small error from nearest-color matching
+        diff = np.abs(original.astype(int) - recovered.astype(int))
+        assert np.mean(diff) < 5.0, f"Mean intensity error too large: {np.mean(diff)}"
+
+    def test_heatmap_to_intensity_shape(self):
+        """Recovered intensity should be 2D (H, W) from 3-channel input."""
+        heatmap = np.zeros((THERMAL_HEIGHT, THERMAL_WIDTH, 3), dtype=np.uint8)
+        intensity = self.processor.heatmap_to_intensity(heatmap)
+        assert intensity.shape == (THERMAL_HEIGHT, THERMAL_WIDTH)
+        assert intensity.dtype == np.uint8
 
 
 class TestThermalProcessor:
@@ -83,20 +83,26 @@ class TestThermalProcessor:
     def setup_method(self):
         self.processor = ThermalProcessor()
 
-    def test_upscale_dimensions(self):
-        """Upscaled image should be RGB resolution."""
+    def test_upscale_intensity_dimensions(self):
+        """Upscaled intensity image should be RGB resolution."""
         thermal = np.random.randint(0, 255, (THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.uint8)
-        upscaled = self.processor.upscale(thermal)
+        upscaled = self.processor.upscale_intensity(thermal)
         assert upscaled.shape == (RGB_HEIGHT, RGB_WIDTH)
+
+    def test_upscale_heatmap_dimensions(self):
+        """Upscaled heatmap should be RGB resolution with 3 channels."""
+        heatmap = np.random.randint(0, 255, (THERMAL_HEIGHT, THERMAL_WIDTH, 3), dtype=np.uint8)
+        upscaled = self.processor.upscale_heatmap(heatmap)
+        assert upscaled.shape == (RGB_HEIGHT, RGB_WIDTH, 3)
 
     def test_fire_mask_threshold(self):
         """Fire mask should correctly threshold at 50°C gray value."""
-        # Create thermal with half above threshold
-        thermal = np.zeros((THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.uint8)
-        thermal[:, THERMAL_WIDTH // 2:] = FIRE_THRESHOLD_GRAY + 10  # Above threshold
-        thermal[:, :THERMAL_WIDTH // 2] = FIRE_THRESHOLD_GRAY - 10  # Below threshold
+        # Create intensity with half above threshold
+        intensity = np.zeros((THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.uint8)
+        intensity[:, THERMAL_WIDTH // 2:] = FIRE_THRESHOLD_GRAY + 10  # Above threshold
+        intensity[:, :THERMAL_WIDTH // 2] = FIRE_THRESHOLD_GRAY - 10  # Below threshold
 
-        upscaled = self.processor.upscale(thermal)
+        upscaled = self.processor.upscale_intensity(intensity)
         mask = self.processor.compute_fire_mask(upscaled)
 
         # Right half should be fire, left half should not
@@ -130,9 +136,12 @@ class TestThermalProcessor:
         assert stats["max_temp"] == 0.0
 
     def test_process_full_pipeline(self):
-        """Full process() should return all expected outputs."""
-        thermal = np.random.randint(0, 255, (THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.uint8)
-        result = self.processor.process(thermal)
+        """Full process() should return all expected outputs with heatmap input."""
+        # Generate a synthetic JET heatmap (simulating what the edge sends)
+        intensity = np.random.randint(0, 255, (THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.uint8)
+        heatmap = cv2.applyColorMap(intensity, cv2.COLORMAP_JET)
+
+        result = self.processor.process(heatmap)
 
         assert "upscaled" in result
         assert "aligned" in result

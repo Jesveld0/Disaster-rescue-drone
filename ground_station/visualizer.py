@@ -27,6 +27,7 @@ from config import (
 )
 from ground_station.fusion import FusionResult, PersonAnalysis, FireZone
 from ground_station.detector import DetectionResult
+from ground_station.pathfinder import PathfindingResult
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class Visualizer:
         't' — Toggle thermal overlay
         'd' — Toggle depth map overlay
         'f' — Toggle fire mask overlay
+        'p' — Toggle A* path overlay
     """
 
     def __init__(self, window_name: str = "Fire Rescue Drone — Ground Station"):
@@ -47,6 +49,7 @@ class Visualizer:
         self.show_thermal_overlay = True
         self.show_depth_overlay = False
         self.show_fire_overlay = True
+        self.show_path_overlay = True
         self._last_thermal = None
 
         # FPS tracking
@@ -71,6 +74,7 @@ class Visualizer:
         thermal_colormap: Optional[np.ndarray] = None,
         fire_mask: Optional[np.ndarray] = None,
         depth_colormap: Optional[np.ndarray] = None,
+        path_result: Optional[PathfindingResult] = None,
     ) -> np.ndarray:
         """
         Render a fully annotated display frame.
@@ -117,6 +121,10 @@ class Visualizer:
         # Draw persons (green for safe, red for in-fire)
         for person in fusion_result.persons:
             self._draw_person(display, person)
+
+        # Draw A* path overlay
+        if self.show_path_overlay and path_result is not None:
+            self._draw_path_overlay(display, path_result)
 
         # Draw status bar
         self._draw_status_bar(display, command_code, frame_id, detections, fusion_result)
@@ -174,8 +182,60 @@ class Visualizer:
         elif key == ord('f'):
             self.show_fire_overlay = not self.show_fire_overlay
             logger.info("Fire overlay: %s", "ON" if self.show_fire_overlay else "OFF")
+        elif key == ord('p'):
+            self.show_path_overlay = not self.show_path_overlay
+            logger.info("Path overlay: %s", "ON" if self.show_path_overlay else "OFF")
 
         return key
+
+    def _draw_path_overlay(self, frame: np.ndarray, path_result: PathfindingResult):
+        """
+        Render the A* path, start, and goal onto the frame.
+
+        - Path line: bright green (cyan when navigating toward a person in fire)
+        - Start marker: white circle with 'S'
+        - Goal marker: green circle (cyan for person-in-fire rescue goal)
+        """
+        goal_color = (255, 200, 0) if path_result.navigating_to_person else (0, 255, 80)
+        path_color = (255, 200, 0) if path_result.navigating_to_person else (0, 255, 80)
+
+        # Draw path polyline
+        if path_result.path_pixels and len(path_result.path_pixels) >= 2:
+            pts = np.array(path_result.path_pixels, dtype=np.int32).reshape(-1, 1, 2)
+            cv2.polylines(frame, [pts], isClosed=False, color=path_color,
+                          thickness=3, lineType=cv2.LINE_AA)
+
+            # Draw waypoint dots
+            for px, py in path_result.path_pixels[1:-1]:
+                cv2.circle(frame, (px, py), 4, path_color, -1, cv2.LINE_AA)
+
+        # Draw start marker (bottom-center)
+        sx, sy = path_result.start_pixel
+        cv2.circle(frame, (sx, sy), 12, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(frame, "S", (sx - 5, sy + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
+        # Draw goal marker
+        gx, gy = path_result.goal_pixel
+        cv2.circle(frame, (gx, gy), 12, goal_color, 2, cv2.LINE_AA)
+        cv2.putText(frame, "G", (gx - 5, gy + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, goal_color, 1, cv2.LINE_AA)
+
+        # Path info label (top-right corner)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        if path_result.path:
+            label = f"PATH: {len(path_result.path)} steps ({path_result.compute_time_ms:.0f}ms)"
+            label_color = goal_color
+        else:
+            label = "PATH: blocked"
+            label_color = (0, 0, 255)
+
+        cv2.putText(frame, label, (frame.shape[1] - 380, 30),
+                    font, 0.55, label_color, 1, cv2.LINE_AA)
+
+        if path_result.navigating_to_person:
+            cv2.putText(frame, "RESCUE ROUTE", (frame.shape[1] - 380, 55),
+                        font, 0.55, (255, 200, 0), 2, cv2.LINE_AA)
 
     def _draw_person(self, frame: np.ndarray, person: PersonAnalysis):
         """Draw a person bounding box with thermal info."""
